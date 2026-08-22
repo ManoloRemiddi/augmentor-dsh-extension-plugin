@@ -1,0 +1,113 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Augmentor — frost veil preview</title>
+<style>
+  :root { color-scheme: light dark; }
+  body {
+    margin: 0; font-family: system-ui, -apple-system, sans-serif;
+    background: #f4f5f2; color: #1c1e1d;
+  }
+  html.dark body { background: #0b0f0e; color: #d8e2dc; }
+  .page { max-width: 720px; margin: 0 auto; padding: 56px 28px 140px; }
+  h1 { font-size: 38px; line-height: 1.15; margin: 0 0 8px; letter-spacing: -0.5px; }
+  .sub { opacity: 0.62; margin: 0 0 28px; font-size: 15px; }
+  h2 { font-size: 20px; margin: 32px 0 8px; }
+  p { line-height: 1.65; margin: 0 0 14px; font-size: 15px; }
+  .card {
+    border: 1px solid rgba(120, 130, 124, 0.35); border-radius: 12px;
+    padding: 18px 20px; margin: 22px 0;
+  }
+  html.dark .card { border-color: rgba(160, 180, 170, 0.3); }
+  .img {
+    height: 190px; border-radius: 12px; margin: 22px 0;
+    background: linear-gradient(135deg, #b8c4bc 0%, #8fa398 40%, #6e8a7d 70%, #57705f 100%);
+  }
+  html.dark .img { background: linear-gradient(135deg, #22302a, #141d18 60%, #0e1512); }
+  a { color: #0f7a4d; }
+  html.dark a { color: #4ade80; }
+  #bar {
+    position: fixed; top: 14px; left: 14px; z-index: 10;
+    display: flex; gap: 8px; flex-wrap: wrap;
+  }
+  #bar button {
+    font: 600 12px/1 ui-monospace, monospace; padding: 7px 12px;
+    border-radius: 9px; border: 1px solid rgba(120, 130, 124, 0.5);
+    background: rgba(255, 255, 255, 0.92); color: #22302a; cursor: pointer;
+  }
+  html.dark #bar button { background: rgba(20, 30, 25, 0.92); color: #cfe5da; border-color: rgba(120, 150, 135, 0.5); }
+  #dbg {
+    position: fixed; top: 14px; right: 14px; z-index: 10;
+    font: 11px/1.5 ui-monospace, monospace; white-space: pre;
+    background: rgba(5, 10, 8, 0.78); color: #9fe8c0;
+    padding: 8px 12px; border-radius: 9px; pointer-events: none;
+  }
+</style>
+</head>
+<body>
+  <div id="bar">
+    <button data-act="show">show: Clicking…</button>
+    <button data-act="type">show: Typing…</button>
+    <button data-act="done">done (melt)</button>
+    <button data-act="fade">fade (remove)</button>
+    <button data-act="dark">dark page</button>
+  </div>
+  <div id="dbg">veil: loading…</div>
+
+  <article class="page">
+    <h1>The quiet science of weather</h1>
+    <p class="sub">A field guide to clouds, fronts, and the strange mathematics of storms.</p>
+    <p>Long before instruments, people read the sky the way sailors still read the
+    sea: as a surface with depth. The low scud streaming across a winter evening
+    is not merely information about tomorrow — it is the visible edge of a
+    three-dimensional machine of heat and vapor, turning above the ground.</p>
+    <div class="img"></div>
+    <h2>Why frost looks alive</h2>
+    <p>Frost forms in fractals because water, freezing, has opinions. Each crystal
+    branches in six because the ice lattice is hexagonal, and the branches branch
+    again because the tips of the crystals grow faster than their flanks. The
+    result is a surface that records its entire weather history in a single
+    flake — a document written in the language of diffusion and diffusion-limited
+    growth.</p>
+    <div class="card">
+      <h2 style="margin-top:0">Note from the editor</h2>
+      <p>This article is a stand-in page for visual testing. It carries ordinary
+      text, a placeholder image, and a bordered card so the overlay can be judged
+      against real content: contrast, legibility, and how the material reads over
+      light and dark backgrounds.</p>
+    </div>
+    <p>Fluids, by contrast, leave no record at all. A snowflake is a noun; a
+    vortex is a verb. What the atmosphere is best at is being both at once —
+    solid where it can be, liquid where it must, and quietly, imperceptibly,
+    changing its mind.</p>
+    <p><a href="#">Read the full field guide →</a></p>
+  </article>
+
+  <script>
+    // ?mode=fog forces the CSS fallback (the v0.1.6 effect) for A/B metrics.
+    if (location.search.includes('mode=fog')) window.__dshAugForceFog = true;
+  </script>
+  <script src="../extension/veil.js"></script>
+  <script>
+    const V = () => window.__dshAugVeil;
+    document.querySelectorAll('#bar button').forEach((b) => {
+      b.addEventListener('click', () => {
+        const a = b.dataset.act;
+        if (a === 'show') V().show('Clicking…', false);
+        if (a === 'type') V().show('Typing…', false);
+        if (a === 'done') V().show('Done', true);
+        if (a === 'fade') V().fade();
+        if (a === 'dark') document.documentElement.classList.toggle('dark');
+      });
+    });
+    const dbg = document.getElementById('dbg');
+    setInterval(() => {
+      const d = V() && V().debug();
+      dbg.textContent = d ? 'veil: ' + JSON.stringify(d) : 'veil: not loaded';
+    }, 400);
+    // auto-start: condense after the page settles
+    setTimeout(() => V().show('Clicking…', false), 350);
+  </script>
+</body>
+</html>

@@ -1,0 +1,648 @@
+/**
+ * Augmentor — the "frost veil" (extension/veil.js).
+ *
+ * The visual indicator that this page is under agent control. A WebGL
+ * frost sheet: a slowly flowing, domain-warped heightfield (iq-style
+ * fbm-of-fbm-of-fbm) lit like a thin sheet of ice seen slightly from
+ * above — Lambert diffuse, a tight moving specular (the "glint"), a
+ * broader sheen, a fresnel rim, cavity darkening in the crevices and a
+ * directional self-shadow along the light — over crystal micro-facets
+ * that shimmer as the light rakes. A parallax snowfall of point-sprite
+ * flakes in a depth band drifts in front. Pointer movement tilts the
+ * view and the light, so the surface reads as 3D material you can see
+ * through: the page behind stays sharp and readable (NO backdrop blur —
+ * the see-through quality is low center alpha only), while an even band
+ * of denser, fuller-green ice condenses around the borders.
+ *
+ * Lifecycle: the frost CONDENSES in over ~1.5s when the agent takes
+ * control (edges first, center last), breathes for the whole turn, and
+ * MELTS away when the turn is done.
+ *
+ * Injected by sw.js: `executeScript({ files: ['veil.js'] })` on every
+ * action (idempotent — only the first run builds anything), followed by
+ * a small func that calls the API. Also loaded directly by
+ * lab/veil-preview.html for visual iteration (plain page script).
+ *
+ * DOM contract (kept from the CSS-fog era, asserted by
+ * lab-overlay-verify.py):
+ *   root #__dshAugOverlay, children [veil, pill, style]
+ *   veil = children[0]; its INLINE opacity is the show/hide switch
+ *   pill children [dot, label]; dot animates __dshAugPulse
+ *
+ * Fallbacks: no WebGL (or prefers-reduced-motion) -> the old layered
+ * CSS fog, same keyframes, same green.
+ *
+ * Everything is pointer-events:none; the canvas is a reduced-resolution
+ * backing store upscaled by CSS (the fog is soft anyway) and the loop
+ * auto-drops quality if frames run slow.
+ */
+(() => {
+  'use strict'
+  if (window.__dshAugVeil) return window.__dshAugVeil
+
+  const OVERLAY_ID = '__dshAugOverlay'
+  const SNOW_COUNT = 200
+  const REVEAL_MS = 1500
+  const MELT_MS = 900
+  const FADE_MS = 700
+  const TIER_SCALE = [0.55, 0.80] // canvas backing-store scale (css px); high enough that the upscale stays smooth
+
+  const S = {
+    root: null,
+    veil: null,
+    pill: null,
+    dot: null,
+    label: null,
+    fadeTimer: null,
+    // WebGL
+    mode: 'none', // none | webgl | fallback
+    tier: 1,
+    canvas: null,
+    gl: null,
+    frost: null, // {prog, u:{}, a:{}}
+    snow: null,
+    quadBuf: null,
+    snowBuf: null,
+    raf: 0,
+    t0: 0,
+    lastT: 0,
+    acc: 0,
+    frames: 0,
+    total: 0,
+    fps: 0,
+    slow: 0,
+    shadowOn: true,
+    // timeline
+    reveal: 1,
+    revealStart: 0,
+    melting: false,
+    melt: 0,
+    meltStart: 0,
+    // pointer (target / smoothed), -1..1
+    tx: 0,
+    ty: 0,
+    px: 0,
+    py: 0,
+  }
+
+  const clamp = (v) => Math.max(-1, Math.min(1, v))
+  const easeOutCubic = (x) => 1 - Math.pow(1 - x, 3)
+  const easeInQuad = (x) => x * x
+
+  // DOM bridge: content-script globals live in the isolated world, so the
+  // main world (lab probes, the extension UI) reads live state from the
+  // root element's dataset instead.
+  function publishState() {
+    if (S.root) S.root.dataset.veil = JSON.stringify({ m: S.mode, f: Math.round(S.fps), t: S.total })
+  }
+
+  // ------------------------------------------------------------- DOM
+  // The fallback keyframes are the v0.1.6 fog verbatim — the fallback must
+  // be indistinguishable from the pre-WebGL effect.
+  const KEYFRAMES =
+    '@keyframes __dshAugPulse{0%,100%{opacity:0.35;transform:scale(0.8)}' +
+    '50%{opacity:1;transform:scale(1.15)}}' +
+    '@keyframes __dshAugFog{from{filter:brightness(0.8)}to{filter:brightness(1.25)}}' +
+    '@keyframes __dshAugFogA{' +
+    '0%{transform:translate(-3%,-2%) rotate(0deg) scale(1)}' +
+    '50%{transform:translate(2.5%,3%) rotate(4deg) scale(1.06)}' +
+    '100%{transform:translate(-1.5%,1%) rotate(-3deg) scale(1.02)}}' +
+    '@keyframes __dshAugFogB{' +
+    '0%{transform:translate(2%,-2.5%) rotate(0deg) scale(1.03)}' +
+    '50%{transform:translate(-3%,2%) rotate(-4deg) scale(1)}' +
+    '100%{transform:translate(1.5%,-1%) rotate(3deg) scale(1.05)}}'
+
+  function ensure() {
+    if (S.root) return
+    const root = document.createElement('div')
+    root.id = OVERLAY_ID
+    root.style.cssText =
+      'all:initial; position:fixed; inset:0; z-index:2147483647; pointer-events:none;'
+    const veil = document.createElement('div')
+    veil.style.cssText = 'position:fixed; inset:0; opacity:0; transition:opacity 0.5s ease;'
+    const pill = document.createElement('div')
+    pill.style.cssText =
+      'position:absolute; left:50%; bottom:20px; transform:translateX(-50%); ' +
+      'display:flex; align-items:center; gap:9px; padding:10px 20px; ' +
+      'background:linear-gradient(180deg, rgba(6,10,8,0.94), rgba(8,14,11,0.94)); ' +
+      'border:1px solid rgba(74,222,128,0.28); border-radius:999px; ' +
+      'box-shadow:0 4px 24px rgba(0,0,0,0.55), 0 0 0 1px rgba(34,197,94,0.18), 0 0 18px rgba(34,197,94,0.25); ' +
+      'opacity:0; transition:opacity 0.3s;'
+    const dot = document.createElement('span')
+    dot.style.cssText =
+      'width:9px; height:9px; border-radius:50%; background:#22c55e; flex:0 0 auto; ' +
+      'animation:__dshAugPulse 1.2s ease-in-out infinite;'
+    const label = document.createElement('span')
+    label.style.cssText =
+      'font:500 14px/1 system-ui,-apple-system,sans-serif; color:#e7f8ee; white-space:nowrap; letter-spacing:0.2px;'
+    pill.append(dot, label)
+    const st = document.createElement('style')
+    st.textContent = KEYFRAMES
+    root.append(veil, pill, st)
+    ;(document.body ?? document.documentElement).append(root)
+    S.root = root
+    S.veil = veil
+    S.pill = pill
+    S.dot = dot
+    S.label = label
+    window.addEventListener('pointermove', onPointer, { passive: true })
+  }
+
+  function onPointer(e) {
+    S.tx = clamp((e.clientX / innerWidth) * 2 - 1)
+    S.ty = clamp((e.clientY / innerHeight) * 2 - 1)
+  }
+
+  // ---------------------------------------------- fallback CSS fog
+  // The pre-WebGL look (v0.1.6): static edge vignette + two drifting
+  // blob layers. Used when WebGL is unavailable or reduced motion is
+  // requested (then only the static vignette).
+  function buildFog(animated) {
+    if (S.canvas) {
+      S.canvas.remove()
+      S.canvas = null
+    }
+    const f0 = document.createElement('div')
+    f0.style.cssText =
+      'position:absolute; inset:0; ' +
+      'background:radial-gradient(50% 50% at 50% 50%, rgba(34,197,94,0) 0%, ' +
+      'rgba(34,197,94,0) 30%, rgba(34,197,94,0.10) 52%, rgba(34,197,94,0.30) 74%, ' +
+      'rgba(34,197,94,0.55) 100%);'
+    S.veil.append(f0)
+    if (!animated) {
+      S.veil.style.animation = ''
+      S.mode = 'fallback'
+      publishState()
+      return
+    }
+    const f1 = document.createElement('div')
+    f1.style.cssText =
+      'position:absolute; inset:-20%; ' +
+      'background:' +
+      'radial-gradient(34% 30% at 18% 22%, rgba(34,197,94,0.35) 0%, rgba(34,197,94,0) 70%),' +
+      'radial-gradient(40% 36% at 84% 76%, rgba(52,211,153,0.30) 0%, rgba(52,211,153,0) 72%),' +
+      'radial-gradient(30% 28% at 78% 18%, rgba(74,222,128,0.22) 0%, rgba(74,222,128,0) 70%); ' +
+      'animation:__dshAugFogA 24s ease-in-out infinite alternate;'
+    const f2 = document.createElement('div')
+    f2.style.cssText =
+      'position:absolute; inset:-20%; ' +
+      'background:' +
+      'radial-gradient(36% 32% at 22% 78%, rgba(34,197,94,0.30) 0%, rgba(34,197,94,0) 70%),' +
+      'radial-gradient(32% 30% at 82% 28%, rgba(52,211,153,0.26) 0%, rgba(52,211,153,0) 70%),' +
+      'radial-gradient(38% 34% at 50% 52%, rgba(34,197,94,0.18) 0%, rgba(34,197,94,0) 75%); ' +
+      'animation:__dshAugFogB 31s ease-in-out infinite alternate;'
+    S.veil.append(f1, f2)
+    S.veil.style.animation = '__dshAugFog 4s ease-in-out infinite alternate'
+    S.mode = 'fallback'
+    publishState()
+  }
+
+  // ------------------------------------------------------------- GL
+  const FROST_VS = `
+attribute vec2 aPos;
+void main() { gl_Position = vec4(aPos, 0.0, 1.0); }
+`
+
+  const FROST_FS = `
+#ifdef GL_FRAGMENT_PRECISION_HIGH
+precision highp float;
+#else
+precision mediump float;
+#endif
+uniform vec2  uRes;
+uniform float uTime;
+uniform float uReveal;
+uniform float uMelt;
+uniform vec2  uPointer;
+uniform float uShadow;
+
+vec3 permute(vec3 x) { return mod(((x * 34.0) + 1.0) * x, 289.0); }
+
+float snoise(vec2 v) {
+  const vec4 C = vec4(0.211324865405187, 0.366025403784439,
+                      -0.577350269189626, 0.024390243902439);
+  vec2 i  = floor(v + dot(v, C.yy));
+  vec2 x0 = v - i + dot(i, C.xx);
+  vec2 i1 = (x0.x > x0.y) ? vec2(1.0, 0.0) : vec2(0.0, 1.0);
+  vec4 x12 = x0.xyxy + C.xxzz;
+  x12.xy -= i1;
+  i = mod(i, 289.0);
+  vec3 p = permute(permute(i.y + vec3(0.0, i1.y, 1.0)) + i.x + vec3(0.0, i1.x, 1.0));
+  vec3 m = max(0.5 - vec3(dot(x0, x0), dot(x12.xy, x12.xy), dot(x12.zw, x12.zw)), 0.0);
+  m = m * m;
+  m = m * m;
+  vec3 x  = 2.0 * fract(p * C.www) - 1.0;
+  vec3 h  = abs(x) - 0.5;
+  vec3 ox = floor(x + 0.5);
+  vec3 a0 = x - ox;
+  m *= 1.79284291400159 - 0.85373472095314 * (a0 * a0 + h * h);
+  vec3 g;
+  g.x  = a0.x  * x0.x  + h.x  * x0.y;
+  g.yz = a0.yz * x12.xz + h.yz * x12.yw;
+  return 130.0 * dot(m, g);
+}
+
+float fbm(vec2 p) {
+  float s = 0.0;
+  float a = 0.5;
+  for (int i = 0; i < 4; i++) {
+    s += a * snoise(p);
+    p = p * 2.02 + vec2(13.1, 7.7);
+    a *= 0.5;
+  }
+  return s;
+}
+
+// One heightfield sample: large slow flow (warped fbm) + a finer, faster
+// ripple. q/r are the domain-warp fields, evaluated once per pixel and
+// reused for the neighbor taps (they are smooth, so the derivative is
+// still organic).
+float heightAt(vec2 p, vec2 q, vec2 r, float t) {
+  float f = fbm(p * 0.62 + 2.6 * r);
+  float g = snoise(p * 2.1 + vec2(t * 1.4, -t * 1.1) + 3.0 * q);
+  return 0.72 * f + 0.56 * g;
+}
+
+void main() {
+  vec2 uv = gl_FragCoord.xy / uRes;
+  float aspect = uRes.x / uRes.y;
+  vec2 p = (uv - 0.5) * vec2(aspect, 1.0) * 3.0;
+  p += uPointer * 0.03; // the sheet leans toward the pointer
+  p.y += uMelt * 0.8;   // melt: the pattern sinks away
+  float t = uTime * 0.055;
+
+  vec2 q = vec2(
+    snoise(p * 0.55 + vec2(  t * 0.9, -t * 0.6)),
+    snoise(p * 0.55 + vec2(-t * 0.7,  t * 1.1))
+  );
+  vec2 r = vec2(
+    snoise(p * 0.55 + 3.0 * q + vec2(1.7, 9.2) +  t * 0.5),
+    snoise(p * 0.55 + 3.0 * q + vec2(8.3, 2.8) - t * 0.4)
+  );
+
+  float h  = heightAt(p, q, r, t);
+  float e  = 0.02;
+  float hL = heightAt(p - vec2(e, 0.0), q, r, t);
+  float hR = heightAt(p + vec2(e, 0.0), q, r, t);
+  float hD = heightAt(p - vec2(0.0, e), q, r, t);
+  float hU = heightAt(p + vec2(0.0, e), q, r, t);
+
+  // Crystal micro-facets: fine shimmer on the normal (kept below the
+  // backing-store Nyquist so the upscale never reads as pixel noise).
+  float m1 = snoise(p * 11.0 + vec2(t * 2.2, -t * 1.7));
+  float m2 = snoise(p * 11.0 + vec2(7.3, 1.9) - t * 1.3);
+  vec3 n = normalize(vec3(
+    (hL - hR) * 55.0 + m1 * 0.5,
+    (hD - hU) * 55.0 + m2 * 0.5,
+    1.0
+  ));
+
+  // View tilts with the pointer; the light rakes across as you move.
+  vec3 v = normalize(vec3(-uPointer.x * 0.45, -uPointer.y * 0.45, 1.0));
+  vec3 l = normalize(vec3(-0.62 + uPointer.x * 0.55, 0.55 + uPointer.y * 0.50, 0.62));
+  float ndl  = max(dot(n, l), 0.0);
+  vec3 hv    = normalize(l + v);
+  float ndhv = max(dot(n, hv), 0.0);
+  // Broad, soft glints instead of tight hot spots (tight ones alias at
+  // the reduced backing-store resolution and read as pixelation).
+  float spec  = pow(ndhv, 80.0);
+  float sheen = pow(ndhv, 22.0) * 0.12;
+  float fres  = pow(1.0 - max(dot(n, v), 0.0), 3.5);
+
+  // Shadows: cavity darkening by height + self-shadow sampled up-light.
+  float cav  = 0.45 + 0.55 * smoothstep(-0.6, 0.8, h);
+  float shad = 1.0;
+  if (uShadow > 0.5) {
+    float hL2 = heightAt(p + l.xy * 0.16, q, r, t);
+    shad = clamp(0.55 + (h - hL2) * 1.7, 0.22, 1.0);
+  }
+
+  vec3 deep = vec3(0.010, 0.075, 0.035);
+  vec3 mid  = vec3(0.030, 0.50, 0.19);
+  vec3 ice  = vec3(0.80, 0.97, 0.84);
+  float drift = 0.5 + 0.5 * sin(uTime * 0.06);
+  vec3 tint = mix(mid, vec3(0.04, 0.50, 0.26), 0.35 + 0.35 * drift);
+
+  // Mid-green base so the sheet reads as tinted glass; the lit side
+  // brightens on top instead of popping from near-black.
+  vec3 col = mix(deep, tint * 0.80, 0.30);
+  col = mix(col, tint * (1.0 + 0.5 * drift), ndl * cav * shad);
+  col += ice * spec * 0.55;
+  col += ice * sheen * ndl;
+  col += tint * fres * 0.5;
+
+  // Glowing veins: thin bands where the flow field crests — light
+  // refracting through thick ice.
+  float vein = smoothstep(0.42, 0.50, h) * (1.0 - smoothstep(0.50, 0.64, h));
+  col += vec3(0.08, 0.90, 0.45) * vein * (0.2 + 0.8 * ndl) * 0.30;
+
+  // A slow sweep of light, like something moving under the ice.
+  float sweep = 0.5 + 0.5 * sin(uv.x * 2.6 + uv.y * 1.4 - uTime * 0.10);
+  col += tint * smoothstep(0.80, 0.99, sweep) * (0.25 + 0.75 * fres) * 0.35;
+
+  col *= 1.0 - 0.6 * uMelt;
+
+  // Border/center split: box distance gives an even band all the way
+  // around (edge midpoints and corners alike). The middle stays a thin,
+  // mostly see-through film so the page behind stays readable; the band
+  // condenses denser and goes a fuller, greener ice.
+  float dBox  = max(abs(uv.x - 0.5) * 2.0, abs(uv.y - 0.5) * 2.0);
+  float edge  = smoothstep(0.70, 0.97, dBox);
+  col = mix(col, vec3(0.10, 0.62, 0.27), edge * 0.60);
+  float lit   = ndl * cav * shad;
+  // Center: a thin film — enough alpha that the 3D material reads, but the
+  // page behind stays readable (no blur to lean on). Border: dense.
+  float a = 0.07 + 0.60 * edge + lit * 0.10;
+  a += spec * 0.45 + vein * 0.12;
+  a = min(a, 0.96);
+  // Condensation: borders first, center last.
+  float thr = 1.0 - 1.15 * uReveal;
+  a *= smoothstep(thr - 0.30, thr + 0.15, edge);
+  a *= 1.0 - uMelt * uMelt;
+  gl_FragColor = vec4(col, a);
+}
+`
+
+  const SNOW_VS = `
+precision mediump float;
+attribute float aSeed;
+uniform vec2  uRes;
+uniform float uTime;
+uniform vec2  uPointer;
+uniform float uReveal;
+uniform float uMelt;
+varying float vDepth;
+
+float hash(float n) { return fract(sin(n) * 43758.5453123); }
+
+void main() {
+  float d  = hash(aSeed * 13.7);
+  float s1 = hash(aSeed * 71.3);
+  float s2 = hash(aSeed * 33.9);
+  float speed = 0.05 + 0.16 * d;                 // near flakes fall faster
+  float phase = fract(s2 - uTime * speed);
+  float sway  = sin(uTime * (0.5 + 1.1 * d) + aSeed * 41.0) * (0.004 + 0.014 * d);
+  float wind  = sin(uTime * 0.21 + s1 * 6.2831) * 0.012;
+  float x = fract(s1 + sway + wind + uPointer.x * (0.004 + 0.022 * d));
+  float y = 1.0 - phase;
+  gl_Position = vec4(x * 2.0 - 1.0, y * 2.0 - 1.0, 0.0, 1.0);
+  gl_PointSize = (2.0 + 13.0 * d * d) * (uRes.y / 800.0) * (0.55 + 0.45 * uReveal) * (1.0 - uMelt);
+  vDepth = d * (1.0 - uMelt);
+}
+`
+
+  const SNOW_FS = `
+precision mediump float;
+varying float vDepth;
+void main() {
+  vec2 c = gl_PointCoord - 0.5;
+  float d = length(c) * 2.0;
+  float body = smoothstep(1.0, 0.15, d);
+  float core = smoothstep(0.55, 0.0, d);
+  float a = body * (0.12 + 0.30 * vDepth) + core * (0.18 + 0.30 * vDepth);
+  vec3 col = mix(vec3(0.55, 0.78, 0.70), vec3(0.86, 0.97, 0.88), vDepth);
+  gl_FragColor = vec4(col, a);
+}
+`
+
+  function compile(gl, type, src) {
+    const s = gl.createShader(type)
+    gl.shaderSource(s, src)
+    gl.compileShader(s)
+    if (!gl.getShaderParameter(s, gl.COMPILE_STATUS))
+      throw new Error(gl.getShaderInfoLog(s) || 'shader compile failed')
+    return s
+  }
+
+  function link(gl, vs, fs, attrs) {
+    const p = gl.createProgram()
+    gl.attachShader(p, compile(gl, gl.VERTEX_SHADER, vs))
+    gl.attachShader(p, compile(gl, gl.FRAGMENT_SHADER, fs))
+    attrs.forEach((a, i) => gl.bindAttribLocation(p, i, a))
+    gl.linkProgram(p)
+    if (!gl.getProgramParameter(p, gl.LINK_STATUS))
+      throw new Error(gl.getProgramInfoLog(p) || 'program link failed')
+    return p
+  }
+
+  function uniforms(gl, p, names) {
+    const u = {}
+    for (const n of names) u[n] = gl.getUniformLocation(p, n)
+    return u
+  }
+
+  function resize() {
+    if (!S.canvas) return
+    const scale = TIER_SCALE[S.tier]
+    S.canvas.width = Math.max(2, Math.round(innerWidth * scale))
+    S.canvas.height = Math.max(2, Math.round(innerHeight * scale))
+  }
+
+  function initGL() {
+    // Fallbacks: ?mode=fog (test hook in the lab preview) forces the CSS
+    // fog so the old effect can be A/B-metrics'ed against the WebGL one —
+    // the full animated v0.1.6 fog; prefers-reduced-motion gets the static
+    // vignette (no drifting smoke).
+    if (window.__dshAugForceFog || (window.matchMedia && matchMedia('(prefers-reduced-motion: reduce)').matches)) {
+      buildFog(!!window.__dshAugForceFog)
+      if (!S.raf) S.raf = requestAnimationFrame(tickFallback)
+      return
+    }
+    try {
+      const c = document.createElement('canvas')
+      c.style.cssText = 'position:absolute; inset:0; width:100%; height:100%;'
+      S.veil.append(c)
+      S.canvas = c
+      const opts = { alpha: true, antialias: false, depth: false, stencil: false, powerPreference: 'low-power' }
+      const gl =
+        (typeof WebGLRenderingContext !== 'undefined' && c.getContext('webgl', opts)) ||
+        c.getContext('experimental-webgl', opts)
+      if (!gl) throw new Error('no webgl context')
+      S.gl = gl
+
+      const fp = link(gl, FROST_VS, FROST_FS, ['aPos'])
+      S.frost = { prog: fp, u: uniforms(gl, fp, ['uRes', 'uTime', 'uReveal', 'uMelt', 'uPointer', 'uShadow']) }
+      const sp = link(gl, SNOW_VS, SNOW_FS, ['aSeed'])
+      S.snow = { prog: sp, u: uniforms(gl, sp, ['uRes', 'uTime', 'uPointer', 'uReveal', 'uMelt']) }
+
+      S.quadBuf = gl.createBuffer()
+      gl.bindBuffer(gl.ARRAY_BUFFER, S.quadBuf)
+      gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]), gl.STATIC_DRAW)
+      const seeds = new Float32Array(SNOW_COUNT)
+      for (let i = 0; i < SNOW_COUNT; i++) seeds[i] = i / SNOW_COUNT
+      S.snowBuf = gl.createBuffer()
+      gl.bindBuffer(gl.ARRAY_BUFFER, S.snowBuf)
+      gl.bufferData(gl.ARRAY_BUFFER, seeds, gl.STATIC_DRAW)
+
+      // No backdrop blur: the page behind must stay fully readable — the
+      // see-through quality comes from the low center alpha only.
+      S.mode = 'webgl'
+      publishState()
+      S.t0 = performance.now()
+      S.lastT = S.t0
+      window.addEventListener('resize', resize)
+      resize()
+      if (!S.raf) S.raf = requestAnimationFrame(frame)
+    } catch (err) {
+      console.warn('veil: webgl unavailable, using css fog fallback', err)
+      buildFog(true)
+      if (!S.raf) S.raf = requestAnimationFrame(tickFallback)
+    }
+  }
+
+  function tickFallback(now) {
+    if (!S.root || !S.veil.isConnected) { S.raf = 0; return }
+    S.raf = requestAnimationFrame(tickFallback)
+    const dt = Math.min(0.1, (now - S.lastT) / 1000)
+    S.lastT = now
+    if (!S.melting) S.reveal = S.revealStart ? easeOutCubic(Math.min(1, (now - S.revealStart) / REVEAL_MS)) : 1
+    if (S.melting) {
+      S.melt = easeInQuad(Math.min(1, (now - S.meltStart) / MELT_MS))
+      if (S.melt >= 1 && S.veil.style.opacity !== '0') S.veil.style.opacity = '0'
+    }
+  }
+
+  // ---------------------------------------------------------- loop
+  function frame(now) {
+    if (!S.root || !S.canvas || !S.canvas.isConnected) {
+      S.raf = 0
+      return
+    }
+    S.raf = requestAnimationFrame(frame)
+    const dt = Math.min(0.1, (now - S.lastT) / 1000)
+    S.lastT = now
+    S.acc += dt
+    S.frames++
+    S.total++
+    if (S.acc >= 1.0) {
+      S.fps = S.frames / S.acc
+      S.acc = 0
+      S.frames = 0
+      publishState()
+    }
+    // Timeline
+    if (!S.melting)
+      S.reveal = S.revealStart ? easeOutCubic(Math.min(1, (now - S.revealStart) / REVEAL_MS)) : 1
+    if (S.melting) {
+      S.melt = easeInQuad(Math.min(1, (now - S.meltStart) / MELT_MS))
+      if (S.melt >= 1 && S.veil.style.opacity !== '0') S.veil.style.opacity = '0'
+    }
+    // Pointer smoothing (critical damping-ish)
+    const k = Math.min(1, dt * 4.0)
+    S.px += (S.tx - S.px) * k
+    S.py += (S.ty - S.py) * k
+    // Adaptive quality: drop to the low tier after a few slow seconds.
+    if (S.tier === 1 && S.fps > 0 && S.fps < 34) {
+      if (++S.slow >= 3) {
+        S.tier = 0
+        S.shadowOn = false
+        resize()
+      }
+    } else S.slow = 0
+
+    const gl = S.gl
+    const t = (now - S.t0) / 1000
+    gl.viewport(0, 0, S.canvas.width, S.canvas.height)
+    gl.clearColor(0, 0, 0, 0)
+    gl.clear(gl.COLOR_BUFFER_BIT)
+    gl.enable(gl.BLEND)
+    gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA)
+
+    // Frost sheet
+    gl.useProgram(S.frost.prog)
+    gl.uniform2f(S.frost.u.uRes, S.canvas.width, S.canvas.height)
+    gl.uniform1f(S.frost.u.uTime, t)
+    gl.uniform1f(S.frost.u.uReveal, S.reveal)
+    gl.uniform1f(S.frost.u.uMelt, S.melt)
+    gl.uniform2f(S.frost.u.uPointer, S.px, S.py)
+    gl.uniform1f(S.frost.u.uShadow, S.shadowOn ? 1 : 0)
+    gl.bindBuffer(gl.ARRAY_BUFFER, S.quadBuf)
+    gl.enableVertexAttribArray(0)
+    gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0)
+    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4)
+
+    // Snowfall
+    gl.useProgram(S.snow.prog)
+    gl.uniform2f(S.snow.u.uRes, S.canvas.width, S.canvas.height)
+    gl.uniform1f(S.snow.u.uTime, t)
+    gl.uniform2f(S.snow.u.uPointer, S.px, S.py)
+    gl.uniform1f(S.snow.u.uReveal, S.reveal)
+    gl.uniform1f(S.snow.u.uMelt, S.melt)
+    gl.bindBuffer(gl.ARRAY_BUFFER, S.snowBuf)
+    gl.enableVertexAttribArray(0)
+    gl.vertexAttribPointer(0, 1, gl.FLOAT, false, 0, 0)
+    gl.drawArrays(gl.POINTS, 0, SNOW_COUNT)
+  }
+
+  // ---------------------------------------------------------- api
+  function show(text, done) {
+    ensure()
+    if (S.mode === 'none') initGL()
+    clearTimeout(S.fadeTimer)
+    S.root.style.opacity = '1'
+    S.pill.style.opacity = '1'
+    const now = performance.now()
+    S.dot.style.background = done ? '#4ade80' : '#22c55e'
+    S.dot.style.animation = done ? 'none' : '__dshAugPulse 1.2s ease-in-out infinite'
+    S.label.textContent = done ? 'Augmentor — done ✓' : `Augmentor — ${String(text)}`
+    S.veil.style.opacity = '1'
+    if (done) {
+      if (!S.melting) {
+        S.melting = true
+        S.meltStart = now
+      }
+    } else {
+      S.melting = false
+      S.melt = 0
+      S.revealStart = now
+      S.reveal = 0
+      S.t0 = now // restart the field's clock with the condensation
+    }
+    if (!S.raf) {
+      S.lastT = now
+      S.raf = requestAnimationFrame(S.mode === 'fallback' ? tickFallback : frame)
+    }
+    return 'shown'
+  }
+
+  function fade() {
+    if (!S.root) return 'absent'
+    const root = S.root
+    root.style.transition = 'opacity 0.6s ease'
+    root.style.opacity = '0'
+    S.fadeTimer = setTimeout(() => {
+      if (root.isConnected) root.remove()
+      S.root = null
+      S.veil = null
+      S.mode = 'none'
+      S.canvas = null
+      S.gl = null
+      S.raf = 0
+      S.melting = false
+      S.melt = 0
+    }, FADE_MS)
+    return 'fading'
+  }
+
+  window.__dshAugVeil = {
+    show,
+    fade,
+    pointer(x, y) {
+      S.tx = clamp(x)
+      S.ty = clamp(y)
+    },
+    debug() {
+      return {
+        mode: S.mode,
+        tier: S.tier,
+        fps: Math.round(S.fps),
+        total: S.total,
+        frames: S.frames,
+        reveal: +S.reveal.toFixed(2),
+        melt: +S.melt.toFixed(2),
+        pointer: [+S.px.toFixed(2), +S.py.toFixed(2)],
+      }
+    },
+  }
+  return window.__dshAugVeil
+})()

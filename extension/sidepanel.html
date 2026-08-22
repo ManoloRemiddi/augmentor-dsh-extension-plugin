@@ -1,0 +1,241 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Augmentor powered by DSH</title>
+<script src="vendor/marked.min.js"></script>
+<!-- Theme restore must be a file, not inline: MV3's default extension-page
+     CSP (script-src 'self') blocks inline scripts in extension pages. -->
+<script src="theme-boot.js"></script>
+<style>
+  :root {
+    color-scheme: dark;
+    --bg: rgb(21, 21, 23);
+    --layer1: rgb(35, 35, 36);
+    --layer2: rgb(44, 44, 46);
+    --layer3: rgb(53, 54, 56);
+    --border: rgba(255, 255, 255, 0.06);
+    --border2: rgba(255, 255, 255, 0.12);
+    --text: rgba(255, 255, 255, 0.92);
+    --text2: rgba(255, 255, 255, 0.62);
+    --text3: rgba(255, 255, 255, 0.42);
+    --sep: rgba(255, 255, 255, 0.25);
+    --brand: rgb(86, 134, 254);
+    --err: rgb(255, 92, 92);
+    --ok: rgb(52, 199, 123);
+    --warn: rgb(245, 158, 11);
+    --hover: rgba(255, 255, 255, 0.08);
+    /* GUI scrollbar tokens (dark): --dsw-alias-scrollbar-bg-l1 / -hover-l1. */
+    --sb-thumb: rgb(60, 60, 61);
+    --sb-thumb-hover: rgb(84, 85, 87);
+    --code: ui-monospace, "SF Mono", "Cascadia Code", Menlo, Consolas, "Courier New", monospace;
+  }
+  /* Light palette: the GUI's light theme values (design-platform.css). */
+  :root[data-theme="light"] {
+    color-scheme: light;
+    --bg: rgb(255, 255, 255);
+    --layer1: rgb(244, 245, 248);
+    --layer2: rgb(238, 240, 244);
+    --layer3: rgb(231, 234, 239);
+    --border: rgba(15, 17, 21, 0.06);
+    --border2: rgba(15, 17, 21, 0.12);
+    --text: rgb(15, 17, 21);
+    --text2: rgb(97, 102, 107);
+    --text3: rgb(129, 133, 140);
+    --sep: rgba(15, 17, 21, 0.22);
+    --brand: rgb(65, 118, 230);
+    --err: rgb(236, 19, 19);
+    --ok: rgb(34, 197, 94);
+    --warn: rgb(245, 158, 11);
+    --hover: rgba(38, 49, 72, 0.06);
+    --sb-thumb: rgb(229, 229, 229);
+    --sb-thumb-hover: rgb(212, 212, 212);
+  }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
+    font: 13px/1.55 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  #app { display: flex; flex-direction: column; height: 100%; }
+
+  header { flex: none; display: flex; align-items: center; gap: 8px;
+    padding: 9px 14px; border-bottom: 1px solid var(--border); }
+  #dot { width: 8px; height: 8px; border-radius: 50%; background: var(--text3); flex: none; }
+  #dot[data-phase="ready"] { background: var(--brand); }
+  #dot[data-phase="connecting"] { background: var(--warn); animation: pulse 1s infinite; }
+  #dot[data-phase="error"] { background: var(--err); }
+  @keyframes pulse { 50% { opacity: 0.4; } }
+  #title { font-size: 13px; font-weight: 600; overflow: hidden;
+    text-overflow: ellipsis; white-space: nowrap; max-width: 55%; }
+  #status { font-size: 11px; color: var(--text3); flex: 1; text-align: right;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .hbtn { flex: none; border: 1px solid var(--border2); border-radius: 6px; background: transparent;
+    color: var(--text2); font-size: 11.5px; font-weight: 600; padding: 4px 10px; cursor: pointer; }
+  .hbtn:hover { background: var(--layer2); color: var(--text); }
+  #connect { background: var(--brand); border: none; color: #fff; }
+  #connect:hover { background: var(--brand); filter: brightness(1.1); }
+  .hicon { flex: none; display: inline-flex; align-items: center; justify-content: center;
+    width: 26px; height: 26px; border: none; border-radius: 6px; background: transparent;
+    color: var(--text2); cursor: pointer; }
+  .hicon:hover { background: var(--hover); color: var(--text); }
+  #theme .icon-moon { display: none; }
+  :root[data-theme="light"] #theme .icon-moon { display: block; }
+  :root[data-theme="light"] #theme .icon-sun { display: none; }
+
+  #logwrap { flex: 1; min-height: 0; position: relative; display: flex; }
+  #log { flex: 1; overflow-y: auto; padding: 12px 14px 4px; display: flex;
+    flex-direction: column; gap: 10px; }
+
+  /* Jump-to-top: floats in while the reader is away from the bottom */
+  #top { position: absolute; right: 12px; bottom: 12px; z-index: 2;
+    display: none; align-items: center; justify-content: center;
+    width: 28px; height: 28px; border-radius: 50%;
+    border: 1px solid var(--border2); background: var(--layer2);
+    color: var(--text2); cursor: pointer; box-shadow: 0 2px 8px rgba(0,0,0,0.18); }
+  #top.show { display: inline-flex; }
+  #top:hover { color: var(--text); background: var(--layer3); }
+
+  /* Scrollbar skin (GUI parity): without color-scheme + this rule every
+     scroll region shows the UA bar, which ignores the palette — a light
+     native bar over the dark panel. 8px, transparent track, token-driven so
+     both themes render their own thumb (GUI scrollbar.css, l1 tokens). */
+  ::-webkit-scrollbar { width: 8px; height: 8px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { border-radius: 4px; background: var(--sb-thumb); }
+  ::-webkit-scrollbar-thumb:hover { background: var(--sb-thumb-hover); }
+  ::-webkit-scrollbar-corner { background: transparent; }
+
+  .msg { display: flex; gap: 8px; align-items: baseline; }
+  .msg .who { flex: none; font-size: 10.5px; font-weight: 700; color: var(--text3);
+    text-transform: uppercase; letter-spacing: 0.06em; padding-top: 2px; }
+  .msg.user { color: var(--text); }
+  /* Assistant blocks stack (Think over text) — a flex row here would let the
+     wide Think block squeeze the reply into a one-character sliver. */
+  .msg.assistant { display: block; }
+  /* User stack: bubble + right-aligned action row beneath it (GUI parity). */
+  .userbody { flex: 1; min-width: 0; }
+  /* Message action row (GUI MessageIconActions parity): per-message copy. */
+  .msgactions { display: flex; align-items: center; gap: 8px; height: 28px; margin-top: 2px; }
+  .msg.user .msgactions { justify-content: flex-end; }
+  .msgaction { display: inline-flex; align-items: center; justify-content: center;
+    width: 28px; height: 28px; padding: 6px; border: none; border-radius: 28px;
+    background: transparent; color: var(--text3); cursor: pointer; }
+  .msgaction:hover { background: var(--hover); color: var(--text2); }
+
+  .md, .msg.assistant { white-space: normal; word-break: break-word; }
+  .md > :first-child, .msg.assistant > :first-child { margin-top: 0; }
+  .md > :last-child, .msg.assistant > :last-child { margin-bottom: 0; }
+  .md p, .msg.assistant p { margin: 0 0 8px; }
+  .md pre, .msg.assistant pre { background: var(--layer1); border: 1px solid var(--border);
+    border-radius: 8px; padding: 8px 10px; overflow-x: auto; font: 11.5px/1.5 var(--code); }
+  .md code, .msg.assistant code { font-family: var(--code); font-size: 0.92em;
+    background: var(--layer2); border-radius: 4px; padding: 1px 5px; }
+  .md pre code, .msg.assistant pre code { background: none; padding: 0; }
+  .md ul, .md ol, .msg.assistant ul, .msg.assistant ol { margin: 0 0 8px; padding-left: 20px; }
+  .md a { color: var(--brand); text-decoration: none; }
+  /* Caret on the live assistant tail while its step is streaming. */
+  .md.streaming::after { content: "▍"; color: var(--brand);
+    animation: caret-blink 1s steps(1) infinite; }
+  @keyframes caret-blink { 50% { opacity: 0; } }
+  .md table, .msg.assistant table { border-collapse: collapse; font-size: 12px; }
+  .md th, .md td, .msg.assistant th, .msg.assistant td { border: 1px solid var(--border2);
+    padding: 3px 8px; }
+
+  .think { margin: 0 0 8px; border: 1px solid var(--border); border-radius: 8px;
+    background: var(--layer1); }
+  .msg.assistant .think:last-child { margin-bottom: 0; }
+  .think summary { display: flex; gap: 8px; align-items: baseline; cursor: pointer;
+    padding: 6px 10px; list-style: none; user-select: none; font-size: 12px; }
+  .think summary::-webkit-details-marker { display: none; }
+  .think-label { flex: none; font-size: 10.5px; font-weight: 700; color: var(--text3);
+    text-transform: uppercase; letter-spacing: 0.06em; }
+  .think-preview { color: var(--text3); font-size: 11.5px; overflow: hidden;
+    text-overflow: ellipsis; white-space: nowrap; flex: 1; }
+  .think pre { margin: 0; padding: 0 10px 8px; font: 11.5px/1.55 var(--code);
+    color: var(--text2); white-space: pre-wrap; word-break: break-word;
+    max-height: 280px; overflow-y: auto; }
+
+  .toolrow { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; width: 100%;
+    border: 1px solid var(--border); border-radius: 8px; background: var(--layer2);
+    padding: 6px 10px; cursor: pointer; font: inherit; color: var(--text); text-align: left; }
+  .toolrow:hover { background: var(--layer3); }
+  .toolname { flex: none; font-size: 10.5px; font-weight: 700; letter-spacing: 0.04em;
+    color: var(--text2); background: var(--bg); border: 1px solid var(--border2);
+    border-radius: 4px; padding: 1px 7px; }
+  .toollabel { flex: 1; min-width: 0; font-size: 12px; color: var(--text);
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .failed-badge { flex: none; font-size: 10px; font-weight: 700; color: var(--err);
+    border: 1px solid rgba(255, 92, 92, 0.45); border-radius: 4px; padding: 0 6px; }
+  .toolbody { display: none; width: 100%; }
+  .toolrow.open .toolbody { display: block; }
+  .outlabel { font-size: 10px; font-weight: 700; color: var(--text3); text-transform: uppercase;
+    letter-spacing: 0.06em; margin: 8px 0 2px; }
+  .toolbody pre { margin: 0; background: var(--bg); border: 1px solid var(--border);
+    border-radius: 6px; padding: 7px 9px; font: 11px/1.5 var(--code); color: var(--text2);
+    white-space: pre-wrap; word-break: break-word; max-height: 220px; overflow-y: auto; }
+
+  .toolresult pre { margin: 0; background: var(--layer1); border: 1px solid var(--border);
+    border-radius: 8px; padding: 7px 9px; font: 11px/1.5 var(--code); color: var(--text2);
+    white-space: pre-wrap; word-break: break-word; max-height: 220px; overflow-y: auto; }
+  .toolresult.err pre { border-color: rgba(255, 92, 92, 0.4); color: var(--err); }
+
+  footer { flex: none; display: flex; gap: 8px; align-items: flex-end;
+    padding: 10px 12px 8px; border-top: 1px solid var(--border); background: var(--layer1); }
+
+  /* Composer dock status strip (GUI parity): access mode · model · stats line. */
+  #strip { flex: none; display: flex; gap: 8px; align-items: center;
+    padding: 5px 12px 7px; background: var(--layer1); border-top: 1px solid var(--border); }
+  #access { flex: none; font-size: 10.5px; color: var(--text2); background: var(--layer2);
+    border: 1px solid var(--border); border-radius: 999px; padding: 1.5px 8px; }
+  #model { flex: none; font-size: 10.5px; color: var(--text2); background: var(--layer2);
+    border: 1px solid var(--border); border-radius: 999px; padding: 1.5px 8px;
+    max-width: 32%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #stats { flex: 1; min-width: 0; font-size: 10.5px; line-height: 18px; color: var(--text3);
+    overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+  #input { flex: 1; resize: none; border: 1px solid var(--border2); border-radius: 8px;
+    background: var(--bg); color: var(--text); font: inherit; padding: 8px 10px;
+    max-height: 120px; outline: none; }
+  #input:focus { border-color: var(--brand); }
+  #send { border: none; border-radius: 8px; background: var(--brand); color: #fff;
+    font-size: 12px; font-weight: 600; padding: 8px 14px; cursor: pointer; height: 36px; }
+  #send:disabled { opacity: 0.4; cursor: default; }
+  #send:not(:disabled):hover { filter: brightness(1.1); }
+</style>
+</head>
+<body>
+<div id="app">
+  <header>
+    <span id="dot"></span>
+    <span id="title">Augmentor</span>
+    <span id="status">disconnected</span>
+    <button id="theme" class="hicon" title="Switch to light theme" aria-label="Switch theme">
+      <svg class="icon-sun" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round">
+        <circle cx="8" cy="8" r="2.8"></circle>
+        <path d="M8 1.4v1.8M8 12.8v1.8M1.4 8h1.8M12.8 8h1.8M3.3 3.3l1.3 1.3M11.4 11.4l1.3 1.3M12.7 3.3l-1.3 1.3M4.6 11.4l-1.3 1.3"></path>
+      </svg>
+      <svg class="icon-moon" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M13.2 9.7A5.6 5.6 0 0 1 6.3 2.8a5.6 5.6 0 1 0 6.9 6.9Z"></path>
+      </svg>
+    </button>
+    <button id="newchat" class="hbtn" title="Start a new session">＋ New chat</button>
+    <button id="connect" class="hbtn">Connect</button>
+  </header>
+  <div id="logwrap">
+    <div id="log"></div>
+    <button id="top" title="Jump to top" aria-label="Jump to top">
+      <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor"
+        stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M4 9.5 8 5.5l4 4" />
+      </svg>
+    </button>
+  </div>
+  <footer>
+    <textarea id="input" rows="2" placeholder="Ask the agent… (Enter to send)"></textarea>
+    <button id="send" disabled>Send</button>
+  </footer>
+  <div id="strip">
+    <span id="access">Full access</span>
+    <span id="model" hidden></span>
+    <span id="stats"></span>
+  </div>
+</div>
+<script type="module" src="sidepanel.js"></script>
+</body>
+</html>

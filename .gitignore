@@ -1,0 +1,4 @@
+# Lab artifacts — large and machine-generated
+trace/
+sessions/
+*.log
