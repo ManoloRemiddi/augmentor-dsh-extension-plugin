@@ -47,6 +47,15 @@
   const FADE_MS = 700
   const TIER_SCALE = [0.55, 0.80] // canvas backing-store scale (css px); high enough that the upscale stays smooth
 
+  // Variation (test hook, set before load; the extension default is the
+  // approved frost sheet). 'glyphs' renders the wave as a field of falling
+  // characters — digits and symbols modulated by the same 3D ice field.
+  const VARIATION = window.__dshAugVariation === 'glyphs' ? 'glyphs' : 'frost'
+  const GLYPH_CELL = 20 // glyph cell size in screen px (scaled to canvas px in the shader)
+  // ASCII-only glyph set (32 chars = 8x4 atlas): renders identically on
+  // every platform, no missing-glyph boxes.
+  const GLYPH_SET = '0123456789ABCDEF' + '+-*/<>=&|#%$!:' + '.,'
+
   const S = {
     root: null,
     veil: null,
@@ -63,6 +72,7 @@
     snow: null,
     quadBuf: null,
     snowBuf: null,
+    atlas: null,
     raf: 0,
     t0: 0,
     lastT: 0,
@@ -93,7 +103,33 @@
   // main world (lab probes, the extension UI) reads live state from the
   // root element's dataset instead.
   function publishState() {
-    if (S.root) S.root.dataset.veil = JSON.stringify({ m: S.mode, f: Math.round(S.fps), t: S.total })
+    if (S.root) S.root.dataset.veil = JSON.stringify({ m: S.mode, f: Math.round(S.fps), t: S.total, v: VARIATION })
+  }
+
+  // --------------------------------------------------------- glyph atlas
+  // 8x4 grid of 64px cells, drawn with the page's monospace stack.
+  function buildGlyphAtlas(gl) {
+    const c = document.createElement('canvas')
+    c.width = 512
+    c.height = 256
+    const x = c.getContext('2d')
+    x.clearRect(0, 0, c.width, c.height)
+    x.fillStyle = '#fff'
+    x.font = '50px monospace'
+    x.textAlign = 'center'
+    x.textBaseline = 'middle'
+    for (let i = 0; i < GLYPH_SET.length; i++)
+      x.fillText(GLYPH_SET[i], (i % 8) * 64 + 32, Math.floor(i / 8) * 64 + 34)
+    const t = gl.createTexture()
+    gl.bindTexture(gl.TEXTURE_2D, t)
+    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true)
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, c)
+    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false)
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR)
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR)
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE)
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE)
+    return t
   }
 
   // ------------------------------------------------------------- DOM
@@ -215,8 +251,15 @@ uniform float uReveal;
 uniform float uMelt;
 uniform vec2  uPointer;
 uniform float uShadow;
+uniform sampler2D uAtlas; // glyph variation: 8x4 white glyphs on transparent
+uniform float uGlyphMode; // 0 = frost sheet (default), 1 = characters
+uniform vec2  uCell;      // glyph cell size, screen px
 
 vec3 permute(vec3 x) { return mod(((x * 34.0) + 1.0) * x, 289.0); }
+
+// Cheap per-column / per-cell hashes for the glyph variation.
+float hash1(float n) { return fract(sin(n * 127.1) * 43758.5453123); }
+float hash21(vec2 p) { return fract(sin(dot(p, vec2(12.9898, 78.233))) * 43758.5453123); }
 
 float snoise(vec2 v) {
   const vec4 C = vec4(0.211324865405187, 0.366025403784439,
@@ -355,6 +398,42 @@ void main() {
   float a = 0.07 + 0.60 * edge + lit * 0.10;
   a += spec * 0.45 + vein * 0.12;
   a = min(a, 0.96);
+
+  // ---- Glyph variation -------------------------------------------
+  // The wave is a field of falling characters instead of a continuous
+  // surface: the same heightfield (lit/cav/shad) modulates glyph
+  // brightness so the ice's motion ripples through the digits, and a
+  // per-column falling pulse (bright head, decaying tail) adds the rain
+  // read. Cells re-scramble out of phase. Borders stay dense and green,
+  // the center a sparse, dim scatter — the page behind stays readable.
+  if (uGlyphMode > 0.5) {
+    vec2 f = gl_FragCoord.xy / (uCell * (uRes.x / 1280.0));
+    vec2 id = floor(f);
+    vec2 guv = fract(f);
+    float cseed = hash21(id);
+    float bucket = floor(uTime * 1.6 + cseed * 19.0); // ~1 change per 0.6 s per cell
+    float gi = mod(hash21(id + vec2(bucket * 7.13, bucket * 3.71)), 32.0);
+    vec2 auv = vec2(
+      (mod(gi, 8.0) + 0.055 + guv.x * 0.89) / 8.0,
+      1.0 - (floor(gi / 8.0) + 0.055 + guv.y * 0.89) / 4.0
+    );
+    float glyph = texture2D(uAtlas, auv).a;
+    // Per-column fall: random start, random speed, bright head + tail.
+    float colSpd = 0.10 + 0.24 * hash1(id.x * 1.71);
+    float d = fract((1.0 - uv.y) - fract(hash1(id.x * 3.17) + uTime * colSpd));
+    float pulse = exp(-d * 10.0);
+    float field = clamp(0.60 * lit + 0.40 * pulse, 0.0, 1.0);
+    float b = 0.20 + 0.80 * field;
+    vec3 gcol = mix(vec3(0.02, 0.10, 0.05), vec3(0.40, 0.98, 0.58), b);
+    // Sparse in the center, a dense wall of characters at the border.
+    float on = step(0.55 - 0.45 * edge, hash21(id * 2.71 + 5.7));
+    float aG = on * glyph * (0.30 + 0.70 * edge) * (0.22 + 0.78 * b);
+    float aB = a * 0.45;
+    float aT = aB + aG * (1.0 - aB);
+    col = (col * aB + gcol * aG) / max(aT, 0.001);
+    a = aT;
+  }
+
   // Condensation: borders first, center last.
   float thr = 1.0 - 1.15 * uReveal;
   a *= smoothstep(thr - 0.30, thr + 0.15, edge);
@@ -461,7 +540,17 @@ void main() {
       S.gl = gl
 
       const fp = link(gl, FROST_VS, FROST_FS, ['aPos'])
-      S.frost = { prog: fp, u: uniforms(gl, fp, ['uRes', 'uTime', 'uReveal', 'uMelt', 'uPointer', 'uShadow']) }
+      S.frost = { prog: fp, u: uniforms(gl, fp, ['uRes', 'uTime', 'uReveal', 'uMelt', 'uPointer', 'uShadow', 'uAtlas', 'uGlyphMode', 'uCell']) }
+      // Glyph variation: bake the character atlas once (white on
+      // transparent; the fragment shader reads the alpha channel).
+      if (VARIATION === 'glyphs') {
+        S.atlas = buildGlyphAtlas(gl)
+        gl.activeTexture(gl.TEXTURE0)
+        gl.bindTexture(gl.TEXTURE_2D, S.atlas)
+        gl.uniform1i(S.frost.u.uAtlas, 0)
+      }
+      gl.uniform1f(S.frost.u.uGlyphMode, VARIATION === 'glyphs' ? 1.0 : 0.0)
+      gl.uniform2f(S.frost.u.uCell, GLYPH_CELL, GLYPH_CELL)
       const sp = link(gl, SNOW_VS, SNOW_FS, ['aSeed'])
       S.snow = { prog: sp, u: uniforms(gl, sp, ['uRes', 'uTime', 'uPointer', 'uReveal', 'uMelt']) }
 
@@ -617,6 +706,7 @@ void main() {
       S.mode = 'none'
       S.canvas = null
       S.gl = null
+      S.atlas = null
       S.raf = 0
       S.melting = false
       S.melt = 0
@@ -634,6 +724,7 @@ void main() {
     debug() {
       return {
         mode: S.mode,
+        var: VARIATION,
         tier: S.tier,
         fps: Math.round(S.fps),
         total: S.total,

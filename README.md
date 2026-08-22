@@ -34,10 +34,10 @@ agent** which controls the user's real browser.
 | `bridge.mjs` | Native messaging host: Chrome port ⇄ runtime stdio re-framing + browser-action HTTP relay. Logs every frame to `trace/`. |
 | `dsh-browser.mjs`, `bin/dsh-browser` | CLI the model runs via bash; POSTs to the bridge relay. |
 | `persona.md` | System prompt (browser-agent rules + dsh-browser usage). |
-| `extension/` | MV3 extension: `sw.js` (port owner + action executor + session owner, full session log with `sinceSeq`-trimmed sync, per-turn active-tab targeting incl. new-tab pages, on-page AI-control overlay: a **frost veil** — WebGL domain-warped heightfield lit as thin ice (moving specular glints, fresnel rim, cavity shadow, self-shadow) with a parallax depth-banded snowfall in front; condenses in (edges first) and melts out, low-resolution canvas with automatic quality drop; falls back to the legacy 3-layer CSS fog (same keyframes) without WebGL, under reduced motion, or behind the `__dshAugForceFog` test hook — + bottom-center status pill + click/type pulse-and-ripple, plain-language status labels (element text, never selectors); the indicator lives for the whole turn and fades only after "done"), `veil.js` (the frost veil itself, self-contained: GLSL shaders + CSS-fog fallback + pill + condense/melt lifecycle, idempotent, exposes `window.__dshAugVeil.{show,fade,pointer,debug}` and bridges live state to the main world via `root.dataset.veil`), `sidepanel.html`/`sidepanel.js` (side-panel chat UI, DSH-GUI parity: Think blocks, compact tool rows, stats line, light/dark theme toggle, jump-to-top), `chat-render.js` (renderer, stick-to-bottom scrolling), `theme-boot.js` (pre-paint theme restore; a file because MV3's extension-page CSP blocks inline scripts), `vendor/marked.min.js` (markdown, HTML-escaped before parse), `manifest.json`. |
+| `extension/` | MV3 extension: `sw.js` (port owner + action executor + session owner, full session log with `sinceSeq`-trimmed sync, per-turn active-tab targeting incl. new-tab pages, on-page AI-control overlay: a **frost veil** — WebGL domain-warped heightfield lit as thin ice (moving specular glints, fresnel rim, cavity shadow, self-shadow) with a parallax depth-banded snowfall in front; condenses in (edges first) and melts out, low-resolution canvas with automatic quality drop; falls back to the legacy 3-layer CSS fog (same keyframes) without WebGL, under reduced motion, or behind the `__dshAugForceFog` test hook — + bottom-center status pill + click/type pulse-and-ripple, plain-language status labels (element text, never selectors); the indicator lives for the whole turn and fades only after "done"), `veil.js` (the frost veil itself, self-contained: GLSL shaders + CSS-fog fallback + pill + condense/melt lifecycle + optional glyph variation (the same waves rendered as a field of falling numbers/symbols, `window.__dshAugVariation = 'glyphs'`, off by default), idempotent, exposes `window.__dshAugVeil.{show,fade,pointer,debug}` and bridges live state to the main world via `root.dataset.veil`), `sidepanel.html`/`sidepanel.js` (side-panel chat UI, DSH-GUI parity: Think blocks, compact tool rows, stats line, light/dark theme toggle, jump-to-top), `chat-render.js` (renderer, stick-to-bottom scrolling), `theme-boot.js` (pre-paint theme restore; a file because MV3's extension-page CSP blocks inline scripts), `vendor/marked.min.js` (markdown, HTML-escaped before parse), `manifest.json`. |
 | `install-native-host.sh` | Writes the native host manifest into the Chromium profile. |
 | `cdp.mjs`, `lab-overlay-verify.py` | Lab tools (not shipped): CDP helper (`targets`/`newtab`/`eval`/`shot`/`bcmd`) and the overlay verification driver (DOM + pixel assertions; mode-branching snap stage: webgl asserts canvas + live frame counter, fallback asserts the 3-layer CSS fog). |
-| `lab/veil-preview.html`, `lab/veil-metrics.py` | Lab tools (not shipped): A/B preview page for the veil (light/dark page, show/done/fade/dark buttons, live debug readout; `?mode=fog` forces the CSS-fog fallback) and the quantitative screenshot metrics (relief, texture, green dominance, see-through correlation, parallax/flow diffs — the stand-in for visual inspection). |
+| `lab/veil-preview.html`, `lab/veil-metrics.py` | Lab tools (not shipped): A/B preview page for the veil (light/dark page, show/done/fade/dark + frost/glyphs/fog switcher, live debug readout; `?mode=fog` forces the CSS-fog fallback, `?mode=glyphs` the characters variation) and the quantitative screenshot metrics (relief, texture, green dominance, see-through correlation, parallax/flow diffs — the stand-in for visual inspection). |
 | `../deepseek-harness/examples/jsonrpc-agent/augmentor.cordis.yml` | Runtime composition (untracked file in the repo). |
 | `trace/*.jsonl` | Per-run frame traces (bridge; every wire frame, both directions). |
 | `sessions/*.jsonl` | Runtime session logs (uncompressed for inspection). |
@@ -370,6 +370,50 @@ llama.cpp `Qwen3.8-27B-UD-Q6_K_XL`.
      greener (ice blue 0.94→0.90, mid/tint greens raised) and the center
      alpha cut (base 0.14→0.055, edge smoothstep 0.22/0.55→0.30/0.62) so the
      middle is genuinely see-through (center-green 33, edge hits 154).
+    - **Four polish tweaks after the user approved the frost (v0.1.7, tuning
+      only, no contract change):** user feedback was (1) "the website in the
+      background is kind of blurry — the effect shouldn't add any blur",
+      (2) "a little bit too pixelated, should look smoother", (3) "the center
+      should have less effect while the border should have more — even more
+      green", (4) "maybe too many highlights — more medium side color".
+      Fixes: **`backdrop-filter: blur(2px)` removed entirely** (see-through
+      now comes purely from the low center alpha; center luminance
+      correlation with the bare page rose 0.93 → 0.993); canvas scale raised
+      to 0.55/0.80, micro-facets softened (freq 15→11), and the tight 1–2 px
+      `pow(110)` glint replaced by a **broad `pow(80)` sheen** (the blocky
+      sparkle was that tight glint upscaling from the small canvas); the
+      border re-derived as a **box-distance band** (`dBox = max(|uv−0.5|)·2`,
+      smoothstep 0.70/0.97 — edge midpoints and corners alike) mixed 60 %
+      toward a saturated green, with the center left a thin film (base alpha
+      0.07); highlight intensities cut (spec ×0.55, sheen ×0.12, veins
+      ×0.30, sweep ×0.35) over a mid-green base added under the lighting.
+      New numbers (light page): left-edge green pixels 154 → 720, border
+      ΔRGB (−101, −21, −71) — deep green; center ΔRGB (−0.5, +11, +4) — a
+      faint frost tint; new bright center pixels 195 → 42 (0 on dark
+      pages); see-through 0.993 light / 0.948 dark. All lab gates still
+      pass on both themes (light 720/61 vs the 240 threshold; dark 720/9).
+    - **Glyph variation — the waves made of numbers and symbols (opt-in,
+      same version):** the user approved the frost and asked what the waves
+      would look like "made by numbers and symbols" instead of pixels. A
+      second look reuses the entire pipeline (DOM contract, condense/melt,
+      pointer parallax, adaptive quality, snowfall, fog fallback) and
+      replaces the surface's character: a **field of falling glyphs** — a
+      32-character ASCII atlas (digits, hex letters, operators; ASCII-only
+      so no missing-glyph boxes on any platform) baked to a texture at init
+      and sampled per 20 px screen cell in the fragment shader. Each cell
+      re-scrambles to a new glyph ~every 0.6 s, out of phase with its
+      neighbours; brightness is modulated by the **same** ice heightfield
+      (the surface's motion ripples through the digits) plus a per-column
+      falling pulse (bright head, decaying tail, random speed) for the rain
+      read. The center is a sparse, dim scatter (~45 % of cells lit); the
+      border a dense wall of characters; the frost base recedes behind it
+      (alpha ×0.45) so the material still reads. Off by default — the
+      extension ships the approved frost; enable with
+      `window.__dshAugVariation = 'glyphs'` set before load (lab preview:
+      `?mode=glyphs`). Verified headless: clean shader compile, 60 fps, lab
+      green gates pass light (720/8) and dark (720/19), see-through 0.994 /
+      0.938, and ~24 % of pixels differ from the frost render (the glyph
+      field's footprint, heaviest at the borders).
 
 ## 3. Teardown
 

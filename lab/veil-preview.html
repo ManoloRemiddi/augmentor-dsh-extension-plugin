@@ -52,6 +52,9 @@
     <button data-act="done">done (melt)</button>
     <button data-act="fade">fade (remove)</button>
     <button data-act="dark">dark page</button>
+    <button data-act="var-frost">frost</button>
+    <button data-act="var-glyphs">glyphs</button>
+    <button data-act="var-fog">fog (v0.1.6)</button>
   </div>
   <div id="dbg">veil: loading…</div>
 
@@ -86,7 +89,9 @@
 
   <script>
     // ?mode=fog forces the CSS fallback (the v0.1.6 effect) for A/B metrics.
+    // ?mode=glyphs forces the characters variation (set BEFORE veil.js loads).
     if (location.search.includes('mode=fog')) window.__dshAugForceFog = true;
+    if (location.search.includes('mode=glyphs')) window.__dshAugVariation = 'glyphs';
   </script>
   <script src="../extension/veil.js"></script>
   <script>
@@ -99,6 +104,14 @@
         if (a === 'done') V().show('Done', true);
         if (a === 'fade') V().fade();
         if (a === 'dark') document.documentElement.classList.toggle('dark');
+        if (a === 'var-frost' || a === 'var-glyphs' || a === 'var-fog') {
+          const q = new URLSearchParams(location.search);
+          q.delete('mode');
+          if (a === 'var-glyphs') q.set('mode', 'glyphs');
+          if (a === 'var-fog') q.set('mode', 'fog');
+          q.set('v', String((parseInt(q.get('v') || '0', 10) + 1))); // cache-bust
+          location.search = q.toString();
+        }
       });
     });
     const dbg = document.getElementById('dbg');
