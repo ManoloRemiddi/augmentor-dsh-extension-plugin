@@ -47,11 +47,12 @@
   const FADE_MS = 700
   const TIER_SCALE = [0.55, 0.80] // canvas backing-store scale (css px); high enough that the upscale stays smooth
 
-  // Variation (test hook, set before load; the extension default is the
-  // approved frost sheet). 'glyphs' renders the wave as a field of falling
-  // characters — digits and symbols modulated by the same 3D ice field.
-  const VARIATION = window.__dshAugVariation === 'glyphs' ? 'glyphs' : 'frost'
-  const GLYPH_CELL = 20 // glyph cell size in screen px (scaled to canvas px in the shader)
+  // Variation (test hook, set before load). The extension default is the
+  // glyph field — the wave rendered as small, translucent digits and symbols
+  // modulated by the same 3D ice field. Set '__dshAugVariation' to 'frost'
+  // to get the approved frost sheet back.
+  const VARIATION = window.__dshAugVariation === 'frost' ? 'frost' : 'glyphs'
+  const GLYPH_CELL = 6 // glyph cell size in screen px (scaled to canvas px in the shader)
   // ASCII-only glyph set (32 chars = 8x4 atlas): renders identically on
   // every platform, no missing-glyph boxes.
   const GLYPH_SET = '0123456789ABCDEF' + '+-*/<>=&|#%$!:' + '.,'
@@ -115,7 +116,7 @@
     const x = c.getContext('2d')
     x.clearRect(0, 0, c.width, c.height)
     x.fillStyle = '#fff'
-    x.font = '50px monospace'
+    x.font = 'bold 50px monospace'
     x.textAlign = 'center'
     x.textBaseline = 'middle'
     for (let i = 0; i < GLYPH_SET.length; i++)
@@ -125,6 +126,9 @@
     gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true)
     gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, c)
     gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false)
+    // LINEAR min (no mipmaps): the glyphs minify ~7x, and mipmap levels
+    // would blur the small strokes into mush — the base level keeps them
+    // sharp enough to read.
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR)
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR)
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE)
@@ -422,15 +426,21 @@ void main() {
     float colSpd = 0.10 + 0.24 * hash1(id.x * 1.71);
     float d = fract((1.0 - uv.y) - fract(hash1(id.x * 3.17) + uTime * colSpd));
     float pulse = exp(-d * 10.0);
-    float field = clamp(0.60 * lit + 0.40 * pulse, 0.0, 1.0);
-    float b = 0.20 + 0.80 * field;
-    vec3 gcol = mix(vec3(0.02, 0.10, 0.05), vec3(0.40, 0.98, 0.58), b);
-    // Sparse in the center, a dense wall of characters at the border.
-    float on = step(0.55 - 0.45 * edge, hash21(id * 2.71 + 5.7));
-    float aG = on * glyph * (0.30 + 0.70 * edge) * (0.22 + 0.78 * b);
-    float aB = a * 0.45;
-    float aT = aB + aG * (1.0 - aB);
-    col = (col * aB + gcol * aG) / max(aT, 0.001);
+    // The wave is the surface brightness itself — characters light up in
+    // the same bands the ice does, plus the falling pulse.
+    float field = clamp(0.70 * lit + 0.30 * pulse, 0.0, 1.0);
+    float b = 0.12 + 0.88 * field;
+    // Dark etched characters, small and translucent: the only thing that
+    // reads against the bright fluid band is dark-on-bright, and they're
+    // light enough that the fluid stays as present as the frost. They lift
+    // slightly at the crests so the wave still pulses through them.
+    vec3 gcol = mix(vec3(0.01, 0.05, 0.02), vec3(0.05, 0.18, 0.09), b);
+    // Dense at the border, sparse in the center.
+    float on = step(0.55 - 0.55 * edge, hash21(id * 2.71 + 5.7));
+    float aG = on * glyph * (0.25 + 0.40 * edge) * (0.35 + 0.45 * b);
+    // Over the fluid, which stays fully present (no wall).
+    float aT = aG + a * (1.0 - aG);
+    col = (gcol * aG + col * a * (1.0 - aG)) / max(aT, 0.001);
     a = aT;
   }
 
@@ -541,6 +551,9 @@ void main() {
 
       const fp = link(gl, FROST_VS, FROST_FS, ['aPos'])
       S.frost = { prog: fp, u: uniforms(gl, fp, ['uRes', 'uTime', 'uReveal', 'uMelt', 'uPointer', 'uShadow', 'uAtlas', 'uGlyphMode', 'uCell']) }
+      // Uniform setters below apply to the CURRENT program — bind it first,
+      // or they are silent no-ops and uGlyphMode would stay 0 (glyphs off).
+      gl.useProgram(fp)
       // Glyph variation: bake the character atlas once (white on
       // transparent; the fragment shader reads the alpha channel).
       if (VARIATION === 'glyphs') {

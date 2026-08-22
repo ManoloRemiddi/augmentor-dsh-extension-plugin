@@ -89,11 +89,18 @@
 
   <script>
     // ?mode=fog forces the CSS fallback (the v0.1.6 effect) for A/B metrics.
-    // ?mode=glyphs forces the characters variation (set BEFORE veil.js loads).
+    // ?mode=glyphs / ?mode=frost force a variation (set BEFORE veil.js loads).
+    // With no ?mode, veil.js defaults to the glyph field (the new default).
     if (location.search.includes('mode=fog')) window.__dshAugForceFog = true;
     if (location.search.includes('mode=glyphs')) window.__dshAugVariation = 'glyphs';
+    if (location.search.includes('mode=frost')) window.__dshAugVariation = 'frost';
   </script>
-  <script src="../extension/veil.js"></script>
+  <script>
+    // Load the live veil.js on every page load. The local http.server sends
+    // no cache headers, so browsers heuristic-cache the script and A/B runs
+    // silently compare the same stale file. A fresh ?t= per load defeats that.
+    document.write('<script src="../extension/veil.js?t=' + Date.now() + '"><\/script>');
+  </script>
   <script>
     const V = () => window.__dshAugVeil;
     document.querySelectorAll('#bar button').forEach((b) => {
@@ -107,6 +114,7 @@
         if (a === 'var-frost' || a === 'var-glyphs' || a === 'var-fog') {
           const q = new URLSearchParams(location.search);
           q.delete('mode');
+          if (a === 'var-frost') q.set('mode', 'frost');
           if (a === 'var-glyphs') q.set('mode', 'glyphs');
           if (a === 'var-fog') q.set('mode', 'fog');
           q.set('v', String((parseInt(q.get('v') || '0', 10) + 1))); // cache-bust
