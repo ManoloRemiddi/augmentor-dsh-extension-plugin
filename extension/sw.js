@@ -215,6 +215,43 @@ function isEmptyTab(t) {
   const u = t?.url ?? ''
   return u === 'about:blank' || /^chrome:\/\/newtab/i.test(u) || /^about:newtab/i.test(u)
 }
+// The window the user is looking at (last focused). From the service
+// worker, a `currentWindow: true` tab query already resolves against the
+// last-focused window; windows.getLastFocused is the backup (needs the
+// "windows" permission). Returns null when neither works.
+async function focusedWindowId() {
+  try {
+    const [t] = await chrome.tabs.query({ active: true, currentWindow: true })
+    if (t?.windowId != null) return t.windowId
+  } catch { /* no active tab in the focused window */ }
+  try {
+    return (await chrome.windows.getLastFocused()).id
+  } catch {
+    return null
+  }
+}
+// Real activation recency: chrome.tabs.Tab has no lastAccessed property,
+// so the SW tracks tab activations itself. Used only when the active tab
+// is not workable — never for the primary "tab the user is looking at"
+// resolution.
+const recentActive = new Map() // tabId -> Date.now() of last activation
+chrome.tabs.onActivated.addListener(({ tabId }) => {
+  recentActive.set(tabId, Date.now())
+  if (recentActive.size > 100) {
+    let oldestId = null
+    let oldestT = Infinity
+    for (const [id, t] of recentActive) {
+      if (t < oldestT) {
+        oldestId = id
+        oldestT = t
+      }
+    }
+    if (oldestId != null) recentActive.delete(oldestId)
+  }
+})
+chrome.tabs.onRemoved.addListener((tabId) => {
+  recentActive.delete(tabId)
+})
 let workTabId = null
 async function workTab() {
   if (workTabId != null) {
@@ -224,27 +261,35 @@ async function workTab() {
     } catch { /* tab closed */ }
     workTabId = null
   }
-  const tabs = await chrome.tabs.query({})
-  const usable = tabs.filter(isWorkTab)
-  // First the tab the user is looking at right now — including a new tab
-  // page (workable via navigate, no content to read until then). windowId is
-  // matched against the last-focused window (Tab.lastFocusedWindow is absent
-  // in some Chromium builds, so derive it). If the active tab is another
-  // non-workable page (extension page, chrome://internal), fall back to the
-  // most recently visited usable tab (lastAccessed) — not the first tab in
-  // the list, which is where the old session-long stickiness landed.
-  let focusedWindowId = null
+  // 1) The tab the user is looking at right now: the active tab of the
+  //    last-focused window — including a new tab page (workable via
+  //    navigate, no content to read until then). Never rely on
+  //    Tab.lastFocusedWindow (absent in some Chromium builds).
+  let active = null
   try {
-    focusedWindowId = (await chrome.windows.getLastFocused()).id
-  } catch { /* single-window default below */ }
-  const active = tabs.find((t) => t.active && (t.lastFocusedWindow === true || t.windowId === focusedWindowId))
+    ;[active] = await chrome.tabs.query({ active: true, currentWindow: true })
+  } catch { /* fall through to the window-derived lookup */ }
+  if (!active) {
+    const wid = await focusedWindowId()
+    const tabs = await chrome.tabs.query({})
+    active =
+      (wid != null ? tabs.find((t) => t.active && t.windowId === wid) : undefined) ??
+      tabs.find((t) => t.active) ??
+      null
+  }
   if (active && (isWorkTab(active) || isEmptyTab(active))) {
     workTabId = active.id
     return active
   }
-  const byRecency = [...usable].sort((a, b) => (b.lastAccessed ?? 0) - (a.lastAccessed ?? 0))
+  // 2) The active tab is a non-workable page (chrome://internal,
+  //    extension page, …): fall back to the most recently activated
+  //    usable tab (tracked via onActivated) — never the first tab in the
+  //    list, which is where the old session-long stickiness landed.
+  const tabs = await chrome.tabs.query({})
+  const usable = tabs.filter(isWorkTab)
+  if (!usable.length) throw new Error('no usable browser tab')
+  const byRecency = [...usable].sort((a, b) => (recentActive.get(b.id) ?? 0) - (recentActive.get(a.id) ?? 0))
   const pick = byRecency[0]
-  if (!pick) throw new Error('no usable browser tab')
   workTabId = pick.id
   return pick
 }
@@ -378,14 +423,16 @@ async function handleBrowserAction(id, params) {
     switch (params?.action) {
       case 'tabs_list': {
         const tabs = await chrome.tabs.query({})
-        // focusedWindow marks the tab the user is currently looking at.
+        // focusedWindow marks the tab the user is currently looking at:
+        // the active tab of the last-focused window.
+        const wid = await focusedWindowId()
         out = {
           tabs: tabs.map((t) => ({
             id: t.id,
             url: t.url ?? null,
             title: t.title ?? null,
             active: !!t.active,
-            focusedWindow: !!t.lastFocusedWindow,
+            focusedWindow: wid != null && !!t.active && t.windowId === wid,
           })),
         }
         try {
