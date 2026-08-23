@@ -105,17 +105,8 @@ function ensurePort() {
       return
     }
     // Notifications: session.event / session.status / subagent.*
-    // Only the current session is surfaced: after "new chat" the runtime may
-    // still stream tail events for the previous session.
     if (msg.method === 'session.event') {
-      if (msg.params?.sessionId !== SESSION_ID) return
-      // Turn ended: the agent gives back control — "Done", then fade.
-      if (msg.params?.event?.type === 'turn/end') {
-        turnActive = false
-        overlayShow(overlayTabId, 'Done ✓', true)
-      }
-      // Full envelope: the panel renders from it and the seq is its dedupe key.
-      broadcast(log('event', { sessionId: msg.params?.sessionId, event: msg.params?.event }))
+      onSessionEvent(msg.params)
       return
     }
     if (msg.method === 'session.status') {
@@ -192,6 +183,24 @@ function summarizeParams(p) {
   if (!p) return p
   if (Array.isArray(p)) return `[${p.length} blocks]`
   return p
+}
+
+// One session.event from the runtime. Only the current session is surfaced:
+// after "new chat" the runtime may still stream tail events for the
+// previous session.
+function onSessionEvent(params) {
+  if (params?.sessionId !== SESSION_ID) return
+  const ev = params?.event
+  // Turn ended: the agent gives back control — "Done", then fade. But only
+  // if the veil is actually up: it follows real browser use, so a text-only
+  // turn (no browser action) never showed it and must not get a phantom
+  // "Done ✓" on the user's tab.
+  if (ev?.type === 'turn/end') {
+    turnActive = false
+    if (overlayVisible) overlayShow(overlayTabId, 'Done ✓', true)
+  }
+  // Full envelope: the panel renders from it and the seq is its dedupe key.
+  broadcast(log('event', { sessionId: params?.sessionId, event: ev }))
 }
 
 // ------------------------------------------------------- browser actions
@@ -330,10 +339,12 @@ const OVERLAY_FADE_MS = 4000 // after an action OUTSIDE a turn (direct relay)
 const OVERLAY_DONE_MS = 2500 // after "Done" at turn end
 let overlayTimer = null
 let overlayTabId = null
-// The indicator lives for the WHOLE turn: it appears when the agent takes
-// control (prompt) and is only removed right before the answer (done fade).
-// Mid-turn actions must NOT arm the idle fade — or the veil would flicker
-// off between steps.
+// True while the veil is (expected to be) on screen. Gates the turn-end
+// "Done ✓": a text-only turn never raised the veil, so there is nothing to
+// report at its end.
+let overlayVisible = false
+// True from prompt to turn/end. While a turn runs, browser actions must NOT
+// arm the idle fade — or the veil would flicker off between steps.
 let turnActive = false
 
 function injectFiles(tabId, files) {
@@ -346,6 +357,7 @@ function overlayShow(tabId, text, done = false) {
   if (tabId == null) return
   clearTimeout(overlayTimer)
   overlayTabId = tabId
+  overlayVisible = true
   injectFiles(tabId, ['veil.js'])
     .then(() =>
       inject(
@@ -364,6 +376,7 @@ function overlayShow(tabId, text, done = false) {
 
 function overlayFade(tabId) {
   if (tabId == null) return
+  overlayVisible = false
   inject(
     tabId,
     (id) => {
@@ -674,12 +687,12 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       sendResponse({ ok: false, error: state.error ?? `not ready (phase: ${state.phase})` })
       return
     }
-    // Show the "AI at work" indicator immediately — the agent has taken
-    // control, and it stays up for the whole turn (turnActive). Best-effort:
-    // no workable tab yet (fresh new-tab page) just means the first action
-    // places it instead.
+    // turnActive keeps mid-turn browser actions from arming the idle fade.
+    // The veil is NOT shown here: it appears when the agent's FIRST browser
+    // action lands (handleBrowserAction) and is removed at turn end. A
+    // text-only turn (correct this text, summarize this file…) must never
+    // mark the user's tab as "under AI control".
     turnActive = true
-    workTab().then((t) => overlayShow(t.id, 'Thinking…')).catch(() => {})
     request('session/prompt', {
       sessionId: SESSION_ID,
       contentBlocks: [{ type: 'text', text: String(msg.text ?? '') }],
@@ -706,6 +719,10 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     state.running = false
     state.log = []
     state.wirelog = []
+    // The old session's turn/end is now filtered out (new SESSION_ID), so a
+    // veil left up by it would linger — take it down now.
+    turnActive = false
+    if (overlayVisible) overlayFade(overlayTabId)
     broadcast(log('newchat', { sessionId: SESSION_ID }))
     sendResponse({ ok: true, sessionId: SESSION_ID })
     return

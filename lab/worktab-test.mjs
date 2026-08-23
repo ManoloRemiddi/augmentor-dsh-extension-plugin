@@ -10,6 +10,11 @@
  * window, the "windows" permission is missing (getLastFocused throws), and
  * Tab.lastFocusedWindow is absent. The agent must resolve to the new tab,
  * not the first tab in the browser.
+ *
+ * Scenario E is the overlay regression: the veil must follow ACTUAL browser
+ * use — a text-only turn (e.g. "correct this text") raises no overlay at
+ * prompt time and no phantom "Done ✓" at turn/end; the first browser action
+ * of a turn raises it, and turn/end retires it with "Done ✓".
  */
 import { readFileSync } from 'node:fs'
 import vm from 'node:vm'
@@ -32,14 +37,28 @@ function makeChrome(scenario) {
   const activatedListeners = []
   const removedListeners = []
   const messageListeners = []
+  // Fake native host port: answers initialize/session/prompt like the real
+  // bridge, so the SW reaches phase 'ready' and the test can drive the full
+  // prompt -> session.event lifecycle (scenario E).
+  const portListeners = []
+  const port = {
+    onMessage: { addListener: (fn) => portListeners.push(fn) },
+    onDisconnect: { addListener: () => {} },
+    postMessage: (msg) => {
+      if (msg.method === 'initialize') {
+        setTimeout(() => portListeners.forEach((fn) => fn({ id: msg.id, result: { serverInfo: { name: 'stub-bridge' } } })), 0)
+      } else if (msg.method === 'session/prompt') {
+        setTimeout(() => portListeners.forEach((fn) => fn({ id: msg.id, result: { messageId: `stub-${msg.id}` } })), 0)
+      }
+    },
+  }
+  const scriptCalls = [] // every chrome.scripting.executeScript the SW makes
   const chrome = {
     runtime: {
       id: 'testextensionid',
       onMessage: { addListener: (fn) => messageListeners.push(fn) },
       sendMessage: () => Promise.resolve(),
-      connectNative: () => {
-        throw new Error('not in test')
-      },
+      connectNative: () => port,
     },
     sidePanel: {
       setPanelBehavior: () => {},
@@ -71,14 +90,17 @@ function makeChrome(scenario) {
       create: () => Promise.resolve({}),
     },
     scripting: {
-      executeScript: () => Promise.reject(new Error('no injection in test')),
+      executeScript: (opts) => {
+        scriptCalls.push(opts)
+        return Promise.resolve([{ result: 'stub-injected' }])
+      },
     },
   }
-  return { chrome, activatedListeners, messageListeners }
+  return { chrome, activatedListeners, messageListeners, portListeners, scriptCalls }
 }
 
 function loadSw(srcText, scenario) {
-  const { chrome, activatedListeners, messageListeners } = makeChrome(scenario)
+  const { chrome, activatedListeners, messageListeners, portListeners, scriptCalls } = makeChrome(scenario)
   const sandbox = {
     chrome,
     console,
@@ -96,7 +118,7 @@ function loadSw(srcText, scenario) {
   }
   vm.createContext(sandbox)
   vm.runInContext(srcText, sandbox, { filename: 'sw.js' })
-  return { sandbox, activatedListeners, messageListeners }
+  return { sandbox, activatedListeners, messageListeners, portListeners, scriptCalls }
 }
 
 // ---------------------------------------------------------------- scenarios
@@ -204,6 +226,44 @@ console.log(`\n=== sw source: ${useGit ? 'git HEAD' : 'working tree'} ===`)
   const out = await sandbox.handleBrowserAction('t1', { action: 'tabs_list' })
   const marked = out.tabs.filter((t) => t.focusedWindow)
   check('D: tabs_list.focusedWindow marks only the user\'s tab', marked.length === 1 && marked[0].id === 202, `marked=${JSON.stringify(marked.map((t) => t.id))}`)
+}
+
+// E: the veil follows ACTUAL browser use. A text-only turn raises nothing
+// (no "Thinking…" at prompt, no phantom "Done ✓" at turn/end); the first
+// browser action of a turn raises the veil; turn/end retires it.
+{
+  const sc = {
+    windowsPerm: true,
+    focusedWindowId: 1,
+    tabs: [
+      { id: 202, url: 'https://en.wikipedia.org/wiki/Foo', title: 'wiki', active: true, windowId: 1 },
+    ],
+  }
+  const { sandbox, messageListeners, portListeners, scriptCalls } = loadSw(src, sc)
+  // Connect the (stub) native port so prompts are accepted (phase 'ready').
+  let sessionId = null
+  messageListeners.forEach((fn) => fn({ type: 'connect' }, {}, (res) => { sessionId = res.sessionId }))
+  await new Promise((r) => setTimeout(r, 25))
+  check('E0: handshake with stub bridge completes', sessionId != null, `sessionId=${sessionId}`)
+  // A text-only turn (the regression: "correct this text I wrote"):
+  messageListeners.forEach((fn) => fn({ type: 'prompt', text: 'correct this text' }, {}, () => {}))
+  await new Promise((r) => setTimeout(r, 25))
+  check('E1: text-only prompt shows no overlay', scriptCalls.length === 0, `injections=${scriptCalls.length}`)
+  portListeners.forEach((fn) => fn({ method: 'session.event', params: { sessionId, event: { type: 'turn/end', seq: 1 } } }))
+  await new Promise((r) => setTimeout(r, 25))
+  check('E2: turn/end after a text-only turn shows no "Done ✓"', scriptCalls.length === 0, `injections=${scriptCalls.length}`)
+  // A browser turn: the first browser action raises the veil…
+  messageListeners.forEach((fn) => fn({ type: 'prompt', text: 'open example.com' }, {}, () => {}))
+  await new Promise((r) => setTimeout(r, 5))
+  await sandbox.handleBrowserAction('t1', { action: 'tabs_list' })
+  await new Promise((r) => setTimeout(r, 25))
+  check('E3: first browser action of a turn shows the overlay', scriptCalls.length >= 2, `injections=${scriptCalls.length}`)
+  // …and turn/end retires it with "Done ✓".
+  const before = scriptCalls.length
+  portListeners.forEach((fn) => fn({ method: 'session.event', params: { sessionId, event: { type: 'turn/end', seq: 2 } } }))
+  await new Promise((r) => setTimeout(r, 25))
+  const doneShow = scriptCalls.slice(before).some((c) => Array.isArray(c.args) && c.args[0] === 'Done ✓')
+  check('E4: turn/end shows "Done ✓" on the visible veil', doneShow, `injections=${scriptCalls.length - before}`)
 }
 
 console.log(failures === 0 ? '\nALL PASS' : `\n${failures} FAILURE(S)`)

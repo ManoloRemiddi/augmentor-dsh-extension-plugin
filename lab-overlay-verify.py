@@ -9,6 +9,8 @@ stages:
   nav       relay navigate wikipedia -> label/veil asserts + pixel shot
   fade      wait 5s -> overlay gone
   noblock   elementFromPoint over the pill returns page content
+  textturn  regression: a text-only turn (no browser use) must raise the
+            veil NOWHERE — not at prompt time, not a "done ✓" at the end
 """
 import json
 import os
@@ -312,7 +314,10 @@ elif stage == "turn":
     check("turn reached done ✓", done_at is not None, joined)
     check("overlay persisted through the whole turn (no mid-turn fade)", absent_midturn == 0,
           f"absences={absent_midturn}")
-    check("saw Thinking…/Analysing… or action states at start", any("Thinking" in l or "Analysing" in l or "Opening" in l for _, l, _, _ in seen), joined)
+    # The veil follows the agent's actions (no more "Thinking…" at prompt
+    # time): at least one live action state must have been visible.
+    check("saw a live action state (Analysing/Opening/Clicking/Typing/Inspecting) during the turn",
+          any(any(k in l for k in ("Analysing", "Opening", "Clicking", "Typing", "Inspecting")) for _, l, _, _ in seen), joined)
     if "click" in prompt.lower():
         check("saw Clicking/Clicked on", any("Clicking" in l or "Clicked on" in l for _, l, _, _ in seen), joined)
     check("saw Typing/Typed into", any("Typing" in l or "Typed into" in l for _, l, _, _ in seen), joined)
@@ -324,6 +329,55 @@ elif stage == "turn":
         chat = ev(PANEL, "document.querySelector('#log')?.innerText?.slice(-400)")
         print("   chat tail:", (chat or "")[-250:])
         check("model answered about the search box", "DeepSeek" in (chat or ""))
+
+elif stage == "textturn":
+    # Regression for the false trigger: a turn that never uses the browser
+    # (e.g. "correct this text I wrote") must raise the veil NOWHERE — not
+    # "Thinking…" at prompt time, not a phantom "done ✓" at the end.
+    prompt = sys.argv[2] if len(sys.argv) > 2 else (
+        "Do not use any tools. Correct the grammar of this sentence and reply "
+        "with the corrected sentence only: 'i has been wrote this sentsense with bad grammer'"
+    )
+    # Clean slate: a veil left by an earlier stage fades on its own — wait for it.
+    for _ in range(16):
+        if not overlay_state().get("present"):
+            break
+        time.sleep(0.5)
+    st0 = overlay_state()
+    check("clean slate (no overlay before the turn)", st0.get("present") is False, json.dumps(st0))
+    log_before = ev(PANEL, "document.querySelector('#log')?.innerText?.length || 0")
+    ev(PANEL, f"""(() => {{
+      const i = document.querySelector('#input')
+      i.value = {json.dumps(prompt)}
+      i.dispatchEvent(new Event('input', {{ bubbles: true }}))
+      document.querySelector('#send').click()
+      return 'sent'
+    }})()""")
+    # End = send re-enabled AND a new answer in the log (the 'running' flag
+    # lags the prompt by one status event; a 5s floor skips that window).
+    start = time.time()
+    sightings = []
+    ended = False
+    deadline = start + 180
+    while time.time() < deadline:
+        time.sleep(0.5)
+        st = overlay_state()
+        if st.get("present"):
+            sightings.append(st.get("label"))
+        send_enabled = ev(PANEL, "document.querySelector('#send')?.disabled === false")
+        log_now = ev(PANEL, "document.querySelector('#log')?.innerText?.length || 0")
+        if send_enabled and log_now > log_before and time.time() - start > 5:
+            ended = True
+            break
+    check("text-only turn completed", ended)
+    # Give a late phantom "done ✓" a chance to appear, then confirm nothing is up.
+    time.sleep(6)
+    late = overlay_state()
+    print("   veil sightings:", sightings or "none", "  late:", json.dumps(late))
+    check("veil never appeared during a text-only turn", not sightings, str(sightings[:5]))
+    check("no phantom 'done ✓' after the turn", late.get("present") is False, json.dumps(late))
+    log_after = ev(PANEL, "document.querySelector('#log')?.innerText?.length || 0")
+    check("model actually answered (log grew)", log_after > log_before, f"{log_before} -> {log_after}")
 else:
     print("unknown stage", stage)
     sys.exit(2)
