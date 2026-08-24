@@ -13,7 +13,13 @@
  *      posts browser actions to; each action becomes a server->client-style
  *      request {id, method:'browser/execute', params} on the Chrome port and
  *      resolves when the extension answers {id, result|error}
- *   4. appends every frame to a JSONL trace file for data collection
+ *   4. serves the bridge-local model methods the extension's picker needs:
+ *      `augmentor/models` (the DSH app's model catalog, read from
+ *      $DSH_HOME/settings.yaml so the sidecar offers exactly what the DSH app
+ *      offers) and `augmentor/switchModel` (restarts the runtime process so
+ *      the new selection reaches the current session, which resumes from its
+ *      persisted log)
+ *   5. appends every frame to a JSONL trace file for data collection
  *
  * All logs go to the trace file and stderr; stdout carries ONLY native
  * frames (the child's stdout carries ONLY JSON-RPC — both must stay pure).
@@ -22,7 +28,9 @@
 import { spawn } from 'node:child_process'
 import { createServer } from 'node:http'
 import { randomBytes } from 'node:crypto'
-import { mkdirSync, readFileSync, writeFileSync, appendFileSync, existsSync } from 'node:fs'
+import { mkdirSync, readFileSync, writeFileSync, appendFileSync, existsSync, readdirSync } from 'node:fs'
+import { createRequire } from 'node:module'
+import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -69,6 +77,93 @@ const dotenv = loadDotEnv(path.join(BASE, '.env'))
 const persona = readFileSync(path.join(BASE, 'persona.md'), 'utf8')
 const SECRET = randomBytes(8).toString('hex')
 
+// ------------------------------------------- model catalog (the DSH app's)
+// The picker lists the DSH app's own model set: the `llm-pi-ai:` provider
+// routes of $DSH_HOME/settings.yaml (the same document the DSH app loads —
+// mx-qwen, gx10-qwen, …) plus the built-in DeepSeek route. The file is
+// re-read per `augmentor/models` request, so a DSH app settings edit lands in
+// the sidecar's picker without a reload, and the two never drift.
+const dshHome = () => process.env['DSH_HOME'] ?? path.join(os.homedir(), '.dsh')
+
+// The clone's yaml parser (the bridge itself stays dependency-free): the
+// direct node_modules entry first, then the pnpm store layout.
+function yamlLib() {
+  const req = createRequire(import.meta.url)
+  const candidates = [path.join(CLONE, 'node_modules', 'yaml')]
+  const pnpm = path.join(CLONE, 'node_modules', '.pnpm')
+  if (existsSync(pnpm)) {
+    for (const dir of readdirSync(pnpm)) {
+      if (dir.startsWith('yaml@')) candidates.push(path.join(pnpm, dir, 'node_modules', 'yaml'))
+    }
+  }
+  for (const dir of candidates) {
+    try {
+      return req(path.join(dir, 'dist', 'index.js'))
+    } catch {
+      /* next candidate */
+    }
+  }
+  throw new Error('yaml package not found under the DSH clone (node_modules/yaml)')
+}
+
+// Built-in DeepSeek catalog when the settings carry no `llm-deepseek.models`
+// override: mirrors dsh-llm-deepseek's DEFAULT_MODELS (adapter.ts).
+const DEEPSEEK_ROUTE = 'deepseek-official'
+const DEFAULT_DEEPSEEK_MODELS = [
+  { provider: DEEPSEEK_ROUTE, model: 'deepseek-v4-flash', name: 'DeepSeek-V4-Flash' },
+  { provider: DEEPSEEK_ROUTE, model: 'deepseek-v4-pro', name: 'DeepSeek-V4-Pro' },
+  { provider: DEEPSEEK_ROUTE, model: 'deepseek-v4-flash-vision-exp', name: 'DeepSeek-V4-Flash-Vision-Exp' },
+]
+
+/**
+ * Read the DSH app's model set for the extension's picker.
+ * @returns {{groups: Array<object>, default: {provider: string, model: string} | null, error?: string}}
+ *   groups in settings.yaml order (local routes first, DeepSeek last);
+ *   default is the first model, so the sidecar's default is the DSH app's
+ *   first-configured model.
+ */
+function loadModelCatalog() {
+  const groups = []
+  let error
+  try {
+    const YAML = yamlLib()
+    const file = path.join(dshHome(), 'settings.yaml')
+    const settings = existsSync(file) ? (YAML.parse(readFileSync(file, 'utf8')) ?? {}) : {}
+    const providers = settings['llm-pi-ai']?.providers
+    if (providers && typeof providers === 'object') {
+      for (const [route, profile] of Object.entries(providers)) {
+        const models = Array.isArray(profile?.models) ? profile.models : []
+        if (!models.length) continue
+        groups.push({
+          provider: route,
+          name: typeof profile?.displayName === 'string' && profile.displayName ? profile.displayName : route,
+          models: models
+            .filter((m) => typeof m?.id === 'string' && m.id)
+            .map((m) => ({
+              provider: route,
+              model: m.id,
+              name: typeof m.name === 'string' && m.name ? m.name : m.id,
+            })),
+        })
+      }
+    }
+    const dsModels = Array.isArray(settings['llm-deepseek']?.models)
+      ? settings['llm-deepseek'].models
+          .filter((m) => typeof m?.id === 'string' && m.id)
+          .map((m) => ({
+            provider: DEEPSEEK_ROUTE,
+            model: m.id,
+            name: typeof m.name === 'string' && m.name ? m.name : m.id,
+          }))
+      : DEFAULT_DEEPSEEK_MODELS
+    groups.push({ provider: DEEPSEEK_ROUTE, name: 'DeepSeek', models: dsModels })
+  } catch (e) {
+    error = String(e?.message ?? e)
+  }
+  const flat = groups.flatMap((g) => g.models)
+  return { groups, default: flat[0] ?? null, ...error ? { error } : {} }
+}
+
 // ------------------------------------------------------- native framing
 const CHUNK = 4
 let pending = Buffer.alloc(0)
@@ -83,10 +178,70 @@ function sendFrame(obj) {
   process.stdout.write(Buffer.concat([len, payload]))
 }
 
+// The selection the live runtime process was initialized with (null before the
+// first initialize). switchModel compares against it: a same-selection switch
+// is a no-op, a changed one restarts the process.
+let initializedSelection = null
+// Set while a switchModel restart is in flight; makes the old runtime's exit
+// event a restart step instead of a bridge shutdown.
+let restarting = false
+
+/**
+ * Serve `augmentor/switchModel`: validate the selection against the catalog,
+ * then restart the runtime so the new model reaches the CURRENT session (the
+ * SDK's initialize only re-points sessions created afterwards; a fresh process
+ * re-creates the session from its persisted log on the new model). The Chrome
+ * port is untouched — the extension re-sends initialize on the new process.
+ */
+function handleSwitchModel(frame) {
+  const provider = frame.params?.provider
+  const model = frame.params?.model
+  const catalog = loadModelCatalog()
+  const known = catalog.groups.some(
+    (g) => g.provider === provider && g.models.some((m) => m.model === model),
+  )
+  if (!known) {
+    trace('bridge', { event: 'switch-model-rejected', provider, model, error: catalog.error ?? 'unknown model' })
+    sendFrame({
+      id: frame.id,
+      error: { code: -32602, message: catalog.error ? `model catalog: ${catalog.error}` : `unknown model: ${provider}/${model}` },
+    })
+    return
+  }
+  if (initializedSelection && initializedSelection.provider === provider && initializedSelection.model === model) {
+    trace('bridge', { event: 'switch-model-noop', provider, model })
+    sendFrame({ id: frame.id, result: { ok: true, changed: false } })
+    return
+  }
+  trace('bridge', { event: 'switch-model-restart', from: initializedSelection, to: { provider, model } })
+  restartRuntime()
+    .then(() => sendFrame({ id: frame.id, result: { ok: true, changed: true } }))
+    .catch((e) => {
+      trace('bridge', { event: 'switch-model-failed', error: String(e?.message ?? e) })
+      sendFrame({ id: frame.id, error: { code: -32000, message: String(e?.message ?? e) } })
+      // A failed respawn leaves the bridge with no runtime: end it so the
+      // extension's reconnect boots a clean pair.
+      cleanup(1)
+    })
+}
+
 function handleChromeFrame(frame) {
-  // Request from the extension (initialize / session/prompt / shutdown).
+  // Request from the extension (initialize / session/prompt / shutdown, plus
+  // the bridge-local model methods).
   if (frame.id !== undefined && frame.method !== undefined) {
     pendingClientRequests.set(frame.id, { method: frame.method, t: Date.now() - T0 })
+    // Bridge-local: the DSH app's model catalog, never forwarded to the runtime.
+    if (frame.method === 'augmentor/models') {
+      const catalog = loadModelCatalog()
+      trace('bridge', { event: 'models-served', groups: catalog.groups.map((g) => `${g.provider}:${g.models.length}`), error: catalog.error ?? null })
+      sendFrame({ id: frame.id, result: catalog })
+      return
+    }
+    // Bridge-local: restart the runtime for the new selection (see above).
+    if (frame.method === 'augmentor/switchModel') {
+      handleSwitchModel(frame)
+      return
+    }
     // The extension's initialize carries a synthetic cwd ('chrome-extension://…');
     // the runtime uses it as the bash tool's default workdir, and spawning in a
     // nonexistent directory surfaces as "spawn bash ENOENT". Pin it to the real
@@ -94,6 +249,7 @@ function handleChromeFrame(frame) {
     if (frame.method === 'initialize') {
       frame.params = { ...(frame.params ?? {}), cwd: WORKDIR }
       trace('bridge', { event: 'initialize-cwd-pinned', cwd: WORKDIR })
+      initializedSelection = { provider: frame.params?.provider, model: frame.params?.model }
     }
     trace('chrome->runtime', frame)
     child.stdin.write(JSON.stringify(frame) + '\n')
@@ -200,19 +356,22 @@ function cleanup(code) {
 }
 
 const nodeDir = path.dirname(process.execPath)
+const RESTART_KILL_TIMEOUT_MS = 5000
 
-httpServer.listen(0, '127.0.0.1', () => {
+// Spawn the JSON-RPC runtime child (first boot or after a model switch).
+// Same composition and environment every time: the selected model travels in
+// the initialize params, not in the process environment.
+function spawnRuntime() {
   const port = httpServer.address().port
-  // The harness scrubs ALL DSH_* (and credential-shaped) env vars before the
-  // bash tool's spawn (dsh-subprocess scrubbedParentEnv), so env cannot carry
-  // the relay coordinates. The shim resolves this file relative to itself.
-  writeFileSync(path.join(BASE, '.browser-endpoint'), JSON.stringify({ url: `http://127.0.0.1:${port}`, secret: SECRET }))
-  trace('bridge', { event: 'browser-relay-listening', port })
   child = spawn(process.execPath, [RUNTIME_BIN, CORDIS_YML], {
     cwd: BASE,
     env: {
-      ...process.env,
+      // Launching-shell env wins over augmentor/.env (Node loadEnvFile
+      // semantics: the file only fills names the process env lacks) — the
+      // DASH_* keys a user exports in the shell that launches Chrome beat
+      // the .env placeholders, matching the DSH credentials layering.
       ...dotenv,
+      ...process.env,
       // The runtime's bash tool must find `node` and `dsh-browser`.
       // Chrome hands native hosts a scrubbed environment (no shell PATH),
       // so always append the standard system dirs — never trust inherited.
@@ -253,9 +412,75 @@ httpServer.listen(0, '127.0.0.1', () => {
   })
 
   child.on('exit', (code, signal) => {
+    if (restarting) {
+      // Part of a deliberate model switch: restartRuntime() owns this exit.
+      trace('bridge', { event: 'restart-old-runtime-exit', code, signal })
+      return
+    }
     trace('bridge', { event: 'runtime-exit', code, signal })
     cleanup(code ?? 0)
   })
+}
+
+/**
+ * Kill the current runtime and spawn a fresh one. Resolves when the new
+ * process is spawned (its stdin is pipe-buffered, so the extension's follow-up
+ * initialize can be sent immediately — the runtime consumes it once booted).
+ * @returns {Promise<void>}
+ */
+function restartRuntime() {
+  if (restarting) return Promise.reject(new Error('runtime restart already in progress'))
+  restarting = true
+  return new Promise((resolve, reject) => {
+    const force = setTimeout(() => {
+      try {
+        child.kill('SIGKILL')
+      } catch {
+        /* already gone */
+      }
+    }, RESTART_KILL_TIMEOUT_MS)
+    const onExit = () => {
+      clearTimeout(force)
+      restarting = false
+      try {
+        spawnRuntime()
+        resolve()
+      } catch (e) {
+        reject(e)
+      }
+    }
+    if (child.exitCode !== null || child.signalCode !== null) {
+      // Already dead: nothing to wait for.
+      clearTimeout(force)
+      restarting = false
+      try {
+        spawnRuntime()
+        resolve()
+      } catch (e) {
+        reject(e)
+      }
+      return
+    }
+    child.once('exit', onExit)
+    try {
+      child.kill('SIGTERM')
+    } catch (e) {
+      clearTimeout(force)
+      child.removeListener('exit', onExit)
+      restarting = false
+      reject(e)
+    }
+  })
+}
+
+httpServer.listen(0, '127.0.0.1', () => {
+  const port = httpServer.address().port
+  // The harness scrubs ALL DSH_* (and credential-shaped) env vars before the
+  // bash tool's spawn (dsh-subprocess scrubbedParentEnv), so env cannot carry
+  // the relay coordinates. The shim resolves this file relative to itself.
+  writeFileSync(path.join(BASE, '.browser-endpoint'), JSON.stringify({ url: `http://127.0.0.1:${port}`, secret: SECRET }))
+  trace('bridge', { event: 'browser-relay-listening', port })
+  spawnRuntime()
 })
 
 process.on('SIGTERM', () => cleanup(0))

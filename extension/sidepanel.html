@@ -4,8 +4,10 @@
 <meta charset="utf-8">
 <title>Augmentor powered by DSH</title>
 <script src="vendor/marked.min.js"></script>
-<!-- Theme restore must be a file, not inline: MV3's default extension-page
-     CSP (script-src 'self') blocks inline scripts in extension pages. -->
+<!-- Theme + color restore must be a file, not inline: MV3's default
+     extension-page CSP (script-src 'self') blocks inline scripts in
+     extension pages. theme-tokens.js first: theme-boot.js uses its math. -->
+<script src="theme-tokens.js"></script>
 <script src="theme-boot.js"></script>
 <style>
   :root {
@@ -75,9 +77,53 @@
     width: 26px; height: 26px; border: none; border-radius: 6px; background: transparent;
     color: var(--text2); cursor: pointer; }
   .hicon:hover { background: var(--hover); color: var(--text); }
-  #theme .icon-moon { display: none; }
-  :root[data-theme="light"] #theme .icon-moon { display: block; }
-  :root[data-theme="light"] #theme .icon-sun { display: none; }
+
+  /* Color picker (header hue icon): a rainbow disc. */
+  #hue .hue-chip { width: 15px; height: 15px; border-radius: 50%;
+    background: conic-gradient(from 90deg, #f43f3f, #f4c23f, #3fc43f, #3fc9f4,
+      #3f5ef4, #b43ff4, #f43f3f);
+    box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.28); }
+  #hue:hover .hue-chip { box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.45); }
+
+  /* Color popover: surface hue / brightness + accent, live preview. */
+  #huepop { position: fixed; z-index: 10; width: 236px; padding: 12px;
+    background: var(--layer1); border: 1px solid var(--border2); border-radius: 10px;
+    box-shadow: 0 8px 30px rgba(0, 0, 0, 0.35); }
+  #huepop[hidden] { display: none; }
+  .hp-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; }
+  .hp-title { font-size: 12px; font-weight: 700; color: var(--text); }
+  .hp-reset { border: 1px solid var(--border2); background: transparent; color: var(--text2);
+    font-size: 10.5px; font-weight: 600; border-radius: 5px; padding: 2px 8px; cursor: pointer; }
+  .hp-reset:hover { background: var(--hover); color: var(--text); }
+  .hp-row { display: block; margin-bottom: 10px; }
+  .hp-label { display: flex; align-items: center; gap: 6px; font-size: 11px; font-weight: 600;
+    color: var(--text2); margin-bottom: 5px; }
+  .hp-val { font-weight: 500; color: var(--text3); font-size: 10.5px; }
+  .hp-sep { height: 1px; background: var(--border); margin: 2px 0 10px; }
+  .hp-swatch { width: 12px; height: 12px; border-radius: 3px; background: var(--brand);
+    box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.3); margin-left: auto; }
+  .hp-seg { display: flex; gap: 4px; }
+  .hp-seg button { flex: 1; display: flex; align-items: center; justify-content: center;
+    gap: 5px; border: 1px solid var(--border2); background: transparent; color: var(--text2);
+    font-size: 11px; font-weight: 600; border-radius: 6px; padding: 4px 0; cursor: pointer; }
+  .hp-seg button:hover { background: var(--hover); color: var(--text); }
+  .hp-seg button.active { background: var(--brand); border-color: var(--brand); color: #fff; }
+  input.hueslider { -webkit-appearance: none; appearance: none; display: block; width: 100%;
+    height: 10px; border-radius: 5px; outline: none; margin: 0; cursor: pointer;
+    border: 1px solid var(--border2); }
+  input.hueslider::-webkit-slider-thumb { -webkit-appearance: none; appearance: none;
+    width: 14px; height: 14px; border-radius: 50%; background: var(--text);
+    border: 2px solid var(--bg); box-shadow: 0 0 0 1px var(--border2), 0 1px 4px rgba(0, 0, 0, 0.4); }
+  #neut-hue, #accent-hue {
+    background: linear-gradient(90deg, hsl(0 80% 55%), hsl(60 80% 55%), hsl(120 80% 45%),
+      hsl(180 80% 45%), hsl(240 80% 60%), hsl(300 80% 55%), hsl(360 80% 55%)); }
+  /* left = darker, right = lighter, in both themes */
+  #neut-bright, #accent-bright { background: linear-gradient(90deg, #232326, #ffffff); }
+  /* mini frost-veil pill: live preview of the overlay color (JS-styled) */
+  .hp-veil { display: flex; align-items: center; gap: 7px; margin: 2px 0 10px;
+    border-radius: 999px; padding: 5px 12px 5px 9px; font-size: 11px; border: 1px solid; }
+  .vp-dot { width: 8px; height: 8px; border-radius: 50%; flex: none; }
+  .hp-note { margin: 0; font-size: 10.5px; line-height: 1.5; color: var(--text3); }
 
   #logwrap { flex: 1; min-height: 0; position: relative; display: flex; }
   #log { flex: 1; overflow-y: auto; padding: 12px 14px 4px; display: flex;
@@ -184,9 +230,44 @@
     padding: 5px 12px 7px; background: var(--layer1); border-top: 1px solid var(--border); }
   #access { flex: none; font-size: 10.5px; color: var(--text2); background: var(--layer2);
     border: 1px solid var(--border); border-radius: 999px; padding: 1.5px 8px; }
-  #model { flex: none; font-size: 10.5px; color: var(--text2); background: var(--layer2);
+  /* Model picker trigger (the DSH composer's model seat): chip + chevron. */
+  #model { flex: none; display: inline-flex; align-items: center; gap: 5px;
+    font-size: 10.5px; color: var(--text2); background: var(--layer2);
     border: 1px solid var(--border); border-radius: 999px; padding: 1.5px 8px;
-    max-width: 32%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    cursor: pointer; font-family: inherit; }
+  #model-label { max-width: 26%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #model .model-chev { flex: none; color: var(--text3); }
+  #model:hover:not(:disabled) { border-color: var(--border2); color: var(--text); }
+  #model:hover:not(:disabled) .model-chev { color: var(--text2); }
+  #model:disabled { opacity: 0.5; cursor: default; }
+  #model.open { border-color: var(--brand); color: var(--text); }
+
+  /* Model popover (DSH ModelSelect parity): provider groups of model rows,
+     a check on the selected row, and a loading / error + retry strip. The
+     bridge serves the catalog from $DSH_HOME/settings.yaml — the same
+     document the DSH app loads. Positioned by sidepanel.js. */
+  #modelpop { position: fixed; z-index: 10; width: 280px; padding: 8px;
+    background: var(--layer1); border: 1px solid var(--border2); border-radius: 10px;
+    box-shadow: 0 8px 30px rgba(0, 0, 0, 0.35); }
+  #modelpop[hidden] { display: none; }
+  #modelpop-body { max-height: 264px; overflow-y: auto; }
+  .mp-group { font-size: 10px; font-weight: 700; color: var(--text3); text-transform: uppercase;
+    letter-spacing: 0.06em; margin: 8px 6px 2px; }
+  .mp-group:first-child { margin-top: 2px; }
+  .mp-row { display: flex; align-items: center; gap: 8px; width: 100%; text-align: left;
+    border: none; background: transparent; color: var(--text); font: inherit;
+    border-radius: 7px; padding: 6px 8px; cursor: pointer; }
+  .mp-row:hover { background: var(--hover); }
+  .mp-name { flex: 1; min-width: 0; font-size: 12px; overflow: hidden;
+    text-overflow: ellipsis; white-space: nowrap; }
+  .mp-check { flex: none; color: var(--brand); display: none; }
+  .mp-row.selected .mp-check { display: inline-flex; }
+  .mp-strip { display: flex; align-items: center; justify-content: space-between; gap: 8px;
+    font-size: 11px; color: var(--text3); padding: 8px 6px; }
+  .mp-strip.err { color: var(--err); }
+  .mp-strip button { border: 1px solid var(--border2); background: transparent; color: var(--text2);
+    font-size: 10.5px; font-weight: 600; border-radius: 5px; padding: 2px 8px; cursor: pointer; }
+  .mp-strip button:hover { background: var(--hover); color: var(--text); }
   #stats { flex: 1; min-width: 0; font-size: 10.5px; line-height: 18px; color: var(--text3);
     overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
   #input { flex: 1; resize: none; border: 1px solid var(--border2); border-radius: 8px;
@@ -197,6 +278,9 @@
     font-size: 12px; font-weight: 600; padding: 8px 14px; cursor: pointer; height: 36px; }
   #send:disabled { opacity: 0.4; cursor: default; }
   #send:not(:disabled):hover { filter: brightness(1.1); }
+  #stop { border: none; border-radius: 8px; background: var(--warn); color: #1a1205;
+    font-size: 12px; font-weight: 700; padding: 8px 14px; cursor: pointer; height: 36px; }
+  #stop:hover { filter: brightness(1.08); }
 </style>
 </head>
 <body>
@@ -205,14 +289,9 @@
     <span id="dot"></span>
     <span id="title">Augmentor</span>
     <span id="status">disconnected</span>
-    <button id="theme" class="hicon" title="Switch to light theme" aria-label="Switch theme">
-      <svg class="icon-sun" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round">
-        <circle cx="8" cy="8" r="2.8"></circle>
-        <path d="M8 1.4v1.8M8 12.8v1.8M1.4 8h1.8M12.8 8h1.8M3.3 3.3l1.3 1.3M11.4 11.4l1.3 1.3M12.7 3.3l-1.3 1.3M4.6 11.4l-1.3 1.3"></path>
-      </svg>
-      <svg class="icon-moon" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-        <path d="M13.2 9.7A5.6 5.6 0 0 1 6.3 2.8a5.6 5.6 0 1 0 6.9 6.9Z"></path>
-      </svg>
+    <button id="hue" class="hicon" title="Theme + colors"
+      aria-label="Color settings" aria-haspopup="dialog">
+      <span class="hue-chip"></span>
     </button>
     <button id="newchat" class="hbtn" title="Start a new session">＋ New chat</button>
     <button id="connect" class="hbtn">Connect</button>
@@ -229,12 +308,73 @@
   <footer>
     <textarea id="input" rows="2" placeholder="Ask the agent… (Enter to send)"></textarea>
     <button id="send" disabled>Send</button>
+    <button id="stop" hidden title="Stop the current run">■ Stop</button>
   </footer>
   <div id="strip">
     <span id="access">Full access</span>
-    <span id="model" hidden></span>
+    <button id="model" hidden title="Switch model" aria-haspopup="dialog">
+      <span id="model-label"></span>
+      <svg class="model-chev" width="10" height="10" viewBox="0 0 16 16" fill="none"
+        stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M4 6l4 4 4-4" />
+      </svg>
+    </button>
     <span id="stats"></span>
   </div>
+</div>
+<!-- Color popover (opened by the hue icon): positioned by sidepanel.js. -->
+<div id="huepop" hidden role="dialog" aria-label="Color settings">
+  <div class="hp-head">
+    <span class="hp-title">Colors</span>
+    <button id="hue-reset" class="hp-reset" type="button">Reset</button>
+  </div>
+  <div class="hp-row">
+    <span class="hp-label">Theme</span>
+    <div id="theme-seg" class="hp-seg" role="group" aria-label="Panel theme">
+      <button type="button" data-theme-opt="light" aria-pressed="false">
+        <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round">
+          <circle cx="8" cy="8" r="2.8"></circle>
+          <path d="M8 1.4v1.8M8 12.8v1.8M1.4 8h1.8M12.8 8h1.8M3.3 3.3l1.3 1.3M11.4 11.4l1.3 1.3M12.7 3.3l-1.3 1.3M4.6 11.4l-1.3 1.3"></path>
+        </svg>
+        Light
+      </button>
+      <button type="button" data-theme-opt="dark" aria-pressed="false">
+        <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M13.2 9.7A5.6 5.6 0 0 1 6.3 2.8a5.6 5.6 0 1 0 6.9 6.9Z"></path>
+        </svg>
+        Dark
+      </button>
+    </div>
+  </div>
+  <label class="hp-row">
+    <span class="hp-label">Surface hue</span>
+    <input id="neut-hue" class="hueslider" type="range" min="0" max="360" step="1">
+  </label>
+  <label class="hp-row">
+    <span class="hp-label">Surface brightness <span id="neut-bright-val" class="hp-val"></span></span>
+    <input id="neut-bright" class="hueslider" type="range" min="-15" max="15" step="1">
+  </label>
+  <div class="hp-sep"></div>
+  <label class="hp-row">
+    <span class="hp-label">Accent <span id="accent-swatch" class="hp-swatch"></span></span>
+    <input id="accent-hue" class="hueslider" type="range" min="0" max="360" step="1">
+  </label>
+  <label class="hp-row">
+    <span class="hp-label">Accent brightness <span id="accent-bright-val" class="hp-val"></span></span>
+    <input id="accent-bright" class="hueslider" type="range" min="-15" max="15" step="1">
+  </label>
+  <div id="veil-preview" class="hp-veil">
+    <span class="vp-dot"></span>
+    <span class="vp-label">Augmentor — Clicking…</span>
+  </div>
+  <p class="hp-note">Surface color tints the panel in light and dark mode. The accent colors
+    buttons, links — and the overlay shown while the agent drives the browser.
+    Brightness shifts lightness in both themes.</p>
+</div>
+<!-- Model picker popover (opened by the #model chip in the strip): the DSH
+     app's model catalog, rows rendered by sidepanel.js. -->
+<div id="modelpop" hidden role="dialog" aria-label="Choose model">
+  <div id="modelpop-body"></div>
 </div>
 <script type="module" src="sidepanel.js"></script>
 </body>

@@ -57,6 +57,89 @@
   // every platform, no missing-glyph boxes.
   const GLYPH_SET = '0123456789ABCDEF' + '+-*/<>=&|#%$!:' + '.,'
 
+  // ------------------------------------------------------- accent palette
+  // The whole effect used to be hardcoded green. It is now driven by ONE
+  // hue — the user's accent color from the side panel (sw.js passes it to
+  // show(); lab/veil-preview.html passes it too; with no hue the original
+  // green (142) stays for A/B parity). Each role keeps the original green
+  // palette's saturation/lightness at accent-hue + a small fixed offset, so
+  // the palette retains its internal hue spread (deep vs ice vs vein)
+  // whatever hue is chosen.
+  //
+  // SYNC: this hslToRgb + VEIL_SPEC must stay in lockstep with
+  // extension/theme-tokens.js (veilPaletteSpec) — the panel's veil preview
+  // chip and the lab verifier compute the same colors.
+  function hslToRgb(h, s, l) {
+    h = ((h % 360) + 360) % 360
+    s /= 100
+    l /= 100
+    const c = (1 - Math.abs(2 * l - 1)) * s
+    const hp = h / 60
+    const x = c * (1 - Math.abs((hp % 2) - 1))
+    let r = 0
+    let g = 0
+    let b = 0
+    if (hp < 1) [r, g, b] = [c, x, 0]
+    else if (hp < 2) [r, g, b] = [x, c, 0]
+    else if (hp < 3) [r, g, b] = [0, c, x]
+    else if (hp < 4) [r, g, b] = [0, x, c]
+    else if (hp < 5) [r, g, b] = [x, 0, c]
+    else [r, g, b] = [c, 0, x]
+    const m = l - c / 2
+    return [Math.round((r + m) * 255), Math.round((g + m) * 255), Math.round((b + m) * 255)]
+  }
+  // Accent lightness from base lightness + accent brightness (−15..15).
+  // bright >= 0 : +bright lightness points (clamped 0..100) — brighten.
+  // bright <  0 : fade multiplicatively to FULL BLACK; at −15 lightness is
+  // 0 (pure black). Continuous at 0. Keep in sync with theme-tokens.js.
+  function accentLight(l, bright) {
+    if (bright >= 0) return Math.max(0, Math.min(100, l + bright))
+    const t = 1 + bright / 15
+    return Math.max(0, l * t)
+  }
+  // [hue offset from the accent, saturation, lightness] per effect role.
+  // At accent hue 142 these reproduce the original green look exactly.
+  const VEIL_SPEC = {
+    deep: [0.5, 72.7, 4.3],
+    mid: [-2, 88.2, 26.7],
+    mid2: [6.5, 85.5, 27.1],
+    ice: [-8, 72.9, 88.4],
+    vein: [5, 84, 49],
+    edge: [-2.5, 71.7, 36.1],
+    dot: [0, 70.6, 45.3],
+    dotDone: [0, 69.2, 58],
+    label: [2.5, 54.8, 93.9],
+    pillBg1: [8, 25, 3.1],
+    pillBg2: [8, 27.3, 4.3],
+    fog2: [16, 64.4, 51.6],
+    snowNear: [18, 34.5, 66.5],
+    snowFar: [-11.5, 63.6, 91.4],
+    glyphNear: [-10, 62.5, 3.1],
+    glyphFar: [-4, 55.9, 11.6],
+  }
+  // `bright` (−15..15) shifts every role's lightness. The + side is
+  // headroom-scaled: the roles span 3.1..93.9, so unscaled +15 would white-out
+  // the extremes; after scaling every role keeps its designed delta. The −
+  // side fades multiplicatively to FULL BLACK (accentLight): at the slider
+  // minimum (−15) every role reaches lightness 0, intermediate steps keep the
+  // roles' relative spacing. Keep in sync with theme-tokens.js (veilPalette).
+  function veilPalette(h, bright) {
+    h = Number.isFinite(h) ? h : 142
+    const lights = Object.values(VEIL_SPEC).map((t) => t[2])
+    let off = Number.isFinite(bright) ? bright : 0
+    if (off > 0) {
+      const headroom = 100 - Math.max(...lights)
+      const scale = headroom / 15
+      if (scale < 1) off *= scale
+    }
+    const p = { hue: h }
+    for (const [k, [offH, s, l]] of Object.entries(VEIL_SPEC))
+      p[k] = hslToRgb(h + offH, s, accentLight(l, off))
+    return p
+  }
+  const rgba = (rgb, a) => `rgba(${rgb[0]}, ${rgb[1]}, ${rgb[2]}, ${a})`
+  const rgb = (rgb) => `rgb(${rgb[0]}, ${rgb[1]}, ${rgb[2]})`
+
   const S = {
     root: null,
     veil: null,
@@ -94,6 +177,12 @@
     ty: 0,
     px: 0,
     py: 0,
+    // accent (see veilPalette): 142 = the original green until show()
+    // passes the user's accent hue + brightness from the side panel
+    accentHue: 142,
+    accentBright: 0,
+    pal: veilPalette(142, 0),
+    fogDivs: [], // fallback-fog layers, re-tinted by setAccent
   }
 
   const clamp = (v) => Math.max(-1, Math.min(1, v))
@@ -104,7 +193,15 @@
   // main world (lab probes, the extension UI) reads live state from the
   // root element's dataset instead.
   function publishState() {
-    if (S.root) S.root.dataset.veil = JSON.stringify({ m: S.mode, f: Math.round(S.fps), t: S.total, v: VARIATION })
+    if (S.root)
+      S.root.dataset.veil = JSON.stringify({
+        m: S.mode,
+        f: Math.round(S.fps),
+        t: S.total,
+        v: VARIATION,
+        a: S.accentHue,
+        b: S.accentBright,
+      })
   }
 
   // --------------------------------------------------------- glyph atlas
@@ -164,17 +261,17 @@
     pill.style.cssText =
       'position:absolute; left:50%; bottom:20px; transform:translateX(-50%); ' +
       'display:flex; align-items:center; gap:9px; padding:10px 20px; ' +
-      'background:linear-gradient(180deg, rgba(6,10,8,0.94), rgba(8,14,11,0.94)); ' +
-      'border:1px solid rgba(74,222,128,0.28); border-radius:999px; ' +
-      'box-shadow:0 4px 24px rgba(0,0,0,0.55), 0 0 0 1px rgba(34,197,94,0.18), 0 0 18px rgba(34,197,94,0.25); ' +
+      `background:linear-gradient(180deg, ${rgba(S.pal.pillBg1, 0.94)}, ${rgba(S.pal.pillBg2, 0.94)}); ` +
+      `border:1px solid ${rgba(S.pal.dotDone, 0.28)}; border-radius:999px; ` +
+      `box-shadow:0 4px 24px rgba(0,0,0,0.55), 0 0 0 1px ${rgba(S.pal.dot, 0.18)}, 0 0 18px ${rgba(S.pal.dot, 0.25)}; ` +
       'opacity:0; transition:opacity 0.3s;'
     const dot = document.createElement('span')
     dot.style.cssText =
-      'width:9px; height:9px; border-radius:50%; background:#22c55e; flex:0 0 auto; ' +
+      `width:9px; height:9px; border-radius:50%; background:${rgb(S.pal.dot)}; flex:0 0 auto; ` +
       'animation:__dshAugPulse 1.2s ease-in-out infinite;'
     const label = document.createElement('span')
     label.style.cssText =
-      'font:500 14px/1 system-ui,-apple-system,sans-serif; color:#e7f8ee; white-space:nowrap; letter-spacing:0.2px;'
+      `font:500 14px/1 system-ui,-apple-system,sans-serif; color:${rgb(S.pal.label)}; white-space:nowrap; letter-spacing:0.2px;`
     pill.append(dot, label)
     const st = document.createElement('style')
     st.textContent = KEYFRAMES
@@ -202,13 +299,16 @@
       S.canvas.remove()
       S.canvas = null
     }
+    S.fogDivs = []
+    const pal = S.pal
     const f0 = document.createElement('div')
     f0.style.cssText =
       'position:absolute; inset:0; ' +
-      'background:radial-gradient(50% 50% at 50% 50%, rgba(34,197,94,0) 0%, ' +
-      'rgba(34,197,94,0) 30%, rgba(34,197,94,0.10) 52%, rgba(34,197,94,0.30) 74%, ' +
-      'rgba(34,197,94,0.55) 100%);'
+      `background:radial-gradient(50% 50% at 50% 50%, ${rgba(pal.dot, 0)} 0%, ` +
+      `${rgba(pal.dot, 0)} 30%, ${rgba(pal.dot, 0.1)} 52%, ${rgba(pal.dot, 0.3)} 74%, ` +
+      `${rgba(pal.dot, 0.55)} 100%);`
     S.veil.append(f0)
+    S.fogDivs.push(f0)
     if (!animated) {
       S.veil.style.animation = ''
       S.mode = 'fallback'
@@ -219,22 +319,95 @@
     f1.style.cssText =
       'position:absolute; inset:-20%; ' +
       'background:' +
-      'radial-gradient(34% 30% at 18% 22%, rgba(34,197,94,0.35) 0%, rgba(34,197,94,0) 70%),' +
-      'radial-gradient(40% 36% at 84% 76%, rgba(52,211,153,0.30) 0%, rgba(52,211,153,0) 72%),' +
-      'radial-gradient(30% 28% at 78% 18%, rgba(74,222,128,0.22) 0%, rgba(74,222,128,0) 70%); ' +
+      `radial-gradient(34% 30% at 18% 22%, ${rgba(pal.dot, 0.35)} 0%, ${rgba(pal.dot, 0)} 70%),` +
+      `radial-gradient(40% 36% at 84% 76%, ${rgba(pal.fog2, 0.3)} 0%, ${rgba(pal.fog2, 0)} 72%),` +
+      `radial-gradient(30% 28% at 78% 18%, ${rgba(pal.dotDone, 0.22)} 0%, ${rgba(pal.dotDone, 0)} 70%); ` +
       'animation:__dshAugFogA 24s ease-in-out infinite alternate;'
     const f2 = document.createElement('div')
     f2.style.cssText =
       'position:absolute; inset:-20%; ' +
       'background:' +
-      'radial-gradient(36% 32% at 22% 78%, rgba(34,197,94,0.30) 0%, rgba(34,197,94,0) 70%),' +
-      'radial-gradient(32% 30% at 82% 28%, rgba(52,211,153,0.26) 0%, rgba(52,211,153,0) 70%),' +
-      'radial-gradient(38% 34% at 50% 52%, rgba(34,197,94,0.18) 0%, rgba(34,197,94,0) 75%); ' +
+      `radial-gradient(36% 32% at 22% 78%, ${rgba(pal.dot, 0.3)} 0%, ${rgba(pal.dot, 0)} 70%),` +
+      `radial-gradient(32% 30% at 82% 28%, ${rgba(pal.fog2, 0.26)} 0%, ${rgba(pal.fog2, 0)} 70%),` +
+      `radial-gradient(38% 34% at 50% 52%, ${rgba(pal.dot, 0.18)} 0%, ${rgba(pal.dot, 0)} 75%); ` +
       'animation:__dshAugFogB 31s ease-in-out infinite alternate;'
     S.veil.append(f1, f2)
+    S.fogDivs.push(f1, f2)
     S.veil.style.animation = '__dshAugFog 4s ease-in-out infinite alternate'
     S.mode = 'fallback'
     publishState()
+  }
+
+  // ---------------------------------------------------------- accent color
+  // The accent hue + a lightness offset re-tint the whole effect: the
+  // status pill, the CSS-fog fallback, and (once GL is up) the
+  // frost/snow shader uniforms. Called from show() with the values the SW
+  // passed — safe to call with the values that are already active
+  // (re-uploads uniforms, harmless).
+  function uploadAccentUniforms() {
+    const gl = S.gl
+    if (!gl) return
+    const set3 = (loc, c) => {
+      if (loc) gl.uniform3f(loc, c[0] / 255, c[1] / 255, c[2] / 255)
+    }
+    const p = S.pal
+    // Bind each program before touching ITS uniforms: uniform3f is a silent
+    // no-op for locations that don't belong to the bound program, and
+    // frame() leaves the snow program bound between calls. (frame() re-binds
+    // both programs on its next tick, so the extra bind is harmless.)
+    if (S.frost) {
+      gl.useProgram(S.frost.prog)
+      const u = S.frost.u
+      set3(u.uDeep, p.deep)
+      set3(u.uMid, p.mid)
+      set3(u.uMid2, p.mid2)
+      set3(u.uIce, p.ice)
+      set3(u.uVein, p.vein)
+      set3(u.uEdge, p.edge)
+      set3(u.uGlyphNear, p.glyphNear)
+      set3(u.uGlyphFar, p.glyphFar)
+    }
+    if (S.snow) {
+      gl.useProgram(S.snow.prog)
+      set3(S.snow.u.uSnowNear, p.snowNear)
+      set3(S.snow.u.uSnowFar, p.snowFar)
+    }
+  }
+
+  function setAccent(h, b) {
+    if (!Number.isFinite(h)) h = 142
+    h = ((h % 360) + 360) % 360
+    b = Number.isFinite(b) ? b : 0
+    const changed = h !== S.accentHue || b !== S.accentBright
+    S.accentHue = h
+    S.accentBright = b
+    if (changed || !S.pal) S.pal = veilPalette(h, b)
+    const p = S.pal
+    if (S.pill) {
+      S.pill.style.background = `linear-gradient(180deg, ${rgba(p.pillBg1, 0.94)}, ${rgba(p.pillBg2, 0.94)})`
+      S.pill.style.border = `1px solid ${rgba(p.dotDone, 0.28)}`
+      S.pill.style.boxShadow = `0 4px 24px rgba(0,0,0,0.55), 0 0 0 1px ${rgba(p.dot, 0.18)}, 0 0 18px ${rgba(p.dot, 0.25)}`
+      S.label.style.color = rgb(p.label)
+    }
+    // The dot color is owned by show() (it flips done/active per state).
+    if (S.fogDivs.length) {
+      const [f0, f1, f2] = S.fogDivs
+      f0.style.background =
+        `radial-gradient(50% 50% at 50% 50%, ${rgba(p.dot, 0)} 0%, ${rgba(p.dot, 0)} 30%, ` +
+        `${rgba(p.dot, 0.1)} 52%, ${rgba(p.dot, 0.3)} 74%, ${rgba(p.dot, 0.55)} 100%)`
+      if (f1)
+        f1.style.background =
+          `radial-gradient(34% 30% at 18% 22%, ${rgba(p.dot, 0.35)} 0%, ${rgba(p.dot, 0)} 70%),` +
+          `radial-gradient(40% 36% at 84% 76%, ${rgba(p.fog2, 0.3)} 0%, ${rgba(p.fog2, 0)} 72%),` +
+          `radial-gradient(30% 28% at 78% 18%, ${rgba(p.dotDone, 0.22)} 0%, ${rgba(p.dotDone, 0)} 70%)`
+      if (f2)
+        f2.style.background =
+          `radial-gradient(36% 32% at 22% 78%, ${rgba(p.dot, 0.3)} 0%, ${rgba(p.dot, 0)} 70%),` +
+          `radial-gradient(32% 30% at 82% 28%, ${rgba(p.fog2, 0.26)} 0%, ${rgba(p.fog2, 0)} 70%),` +
+          `radial-gradient(38% 34% at 50% 52%, ${rgba(p.dot, 0.18)} 0%, ${rgba(p.dot, 0)} 75%)`
+    }
+    uploadAccentUniforms()
+    if (changed) publishState()
   }
 
   // ------------------------------------------------------------- GL
@@ -258,6 +431,17 @@ uniform float uShadow;
 uniform sampler2D uAtlas; // glyph variation: 8x4 white glyphs on transparent
 uniform float uGlyphMode; // 0 = frost sheet (default), 1 = characters
 uniform vec2  uCell;      // glyph cell size, screen px
+// Accent palette (setAccent from the user's accent hue; see veilPalette).
+// uMid2/uVein/etc. keep the original green palette's hue spread relative
+// to the accent — at hue 142 they are the original greens.
+uniform vec3  uDeep;
+uniform vec3  uMid;
+uniform vec3  uMid2;
+uniform vec3  uIce;
+uniform vec3  uVein;
+uniform vec3  uEdge;
+uniform vec3  uGlyphNear;
+uniform vec3  uGlyphFar;
 
 vec3 permute(vec3 x) { return mod(((x * 34.0) + 1.0) * x, 289.0); }
 
@@ -364,11 +548,11 @@ void main() {
     shad = clamp(0.55 + (h - hL2) * 1.7, 0.22, 1.0);
   }
 
-  vec3 deep = vec3(0.010, 0.075, 0.035);
-  vec3 mid  = vec3(0.030, 0.50, 0.19);
-  vec3 ice  = vec3(0.80, 0.97, 0.84);
+  vec3 deep = uDeep;
+  vec3 mid  = uMid;
+  vec3 ice  = uIce;
   float drift = 0.5 + 0.5 * sin(uTime * 0.06);
-  vec3 tint = mix(mid, vec3(0.04, 0.50, 0.26), 0.35 + 0.35 * drift);
+  vec3 tint = mix(mid, uMid2, 0.35 + 0.35 * drift);
 
   // Mid-green base so the sheet reads as tinted glass; the lit side
   // brightens on top instead of popping from near-black.
@@ -381,7 +565,7 @@ void main() {
   // Glowing veins: thin bands where the flow field crests — light
   // refracting through thick ice.
   float vein = smoothstep(0.42, 0.50, h) * (1.0 - smoothstep(0.50, 0.64, h));
-  col += vec3(0.08, 0.90, 0.45) * vein * (0.2 + 0.8 * ndl) * 0.30;
+  col += uVein * vein * (0.2 + 0.8 * ndl) * 0.30;
 
   // A slow sweep of light, like something moving under the ice.
   float sweep = 0.5 + 0.5 * sin(uv.x * 2.6 + uv.y * 1.4 - uTime * 0.10);
@@ -395,7 +579,7 @@ void main() {
   // condenses denser and goes a fuller, greener ice.
   float dBox  = max(abs(uv.x - 0.5) * 2.0, abs(uv.y - 0.5) * 2.0);
   float edge  = smoothstep(0.70, 0.97, dBox);
-  col = mix(col, vec3(0.10, 0.62, 0.27), edge * 0.60);
+  col = mix(col, uEdge, edge * 0.60);
   float lit   = ndl * cav * shad;
   // Center: a thin film — enough alpha that the 3D material reads, but the
   // page behind stays readable (no blur to lean on). Border: dense.
@@ -434,7 +618,7 @@ void main() {
     // reads against the bright fluid band is dark-on-bright, and they're
     // light enough that the fluid stays as present as the frost. They lift
     // slightly at the crests so the wave still pulses through them.
-    vec3 gcol = mix(vec3(0.01, 0.05, 0.02), vec3(0.05, 0.18, 0.09), b);
+    vec3 gcol = mix(uGlyphNear, uGlyphFar, b);
     // Dense at the border, sparse in the center.
     float on = step(0.55 - 0.55 * edge, hash21(id * 2.71 + 5.7));
     float aG = on * glyph * (0.25 + 0.40 * edge) * (0.35 + 0.45 * b);
@@ -483,13 +667,15 @@ void main() {
   const SNOW_FS = `
 precision mediump float;
 varying float vDepth;
+uniform vec3  uSnowNear;
+uniform vec3  uSnowFar;
 void main() {
   vec2 c = gl_PointCoord - 0.5;
   float d = length(c) * 2.0;
   float body = smoothstep(1.0, 0.15, d);
   float core = smoothstep(0.55, 0.0, d);
   float a = body * (0.12 + 0.30 * vDepth) + core * (0.18 + 0.30 * vDepth);
-  vec3 col = mix(vec3(0.55, 0.78, 0.70), vec3(0.86, 0.97, 0.88), vDepth);
+  vec3 col = mix(uSnowNear, uSnowFar, vDepth);
   gl_FragColor = vec4(col, a);
 }
 `
@@ -535,6 +721,7 @@ void main() {
     if (window.__dshAugForceFog || (window.matchMedia && matchMedia('(prefers-reduced-motion: reduce)').matches)) {
       buildFog(!!window.__dshAugForceFog)
       if (!S.raf) S.raf = requestAnimationFrame(tickFallback)
+      setAccent(S.accentHue, S.accentBright) // re-tint the fog to the active accent
       return
     }
     try {
@@ -550,7 +737,14 @@ void main() {
       S.gl = gl
 
       const fp = link(gl, FROST_VS, FROST_FS, ['aPos'])
-      S.frost = { prog: fp, u: uniforms(gl, fp, ['uRes', 'uTime', 'uReveal', 'uMelt', 'uPointer', 'uShadow', 'uAtlas', 'uGlyphMode', 'uCell']) }
+      S.frost = {
+        prog: fp,
+        u: uniforms(gl, fp, [
+          'uRes', 'uTime', 'uReveal', 'uMelt', 'uPointer', 'uShadow',
+          'uAtlas', 'uGlyphMode', 'uCell',
+          'uDeep', 'uMid', 'uMid2', 'uIce', 'uVein', 'uEdge', 'uGlyphNear', 'uGlyphFar',
+        ]),
+      }
       // Uniform setters below apply to the CURRENT program — bind it first,
       // or they are silent no-ops and uGlyphMode would stay 0 (glyphs off).
       gl.useProgram(fp)
@@ -565,7 +759,10 @@ void main() {
       gl.uniform1f(S.frost.u.uGlyphMode, VARIATION === 'glyphs' ? 1.0 : 0.0)
       gl.uniform2f(S.frost.u.uCell, GLYPH_CELL, GLYPH_CELL)
       const sp = link(gl, SNOW_VS, SNOW_FS, ['aSeed'])
-      S.snow = { prog: sp, u: uniforms(gl, sp, ['uRes', 'uTime', 'uPointer', 'uReveal', 'uMelt']) }
+      S.snow = {
+        prog: sp,
+        u: uniforms(gl, sp, ['uRes', 'uTime', 'uPointer', 'uReveal', 'uMelt', 'uSnowNear', 'uSnowFar']),
+      }
 
       S.quadBuf = gl.createBuffer()
       gl.bindBuffer(gl.ARRAY_BUFFER, S.quadBuf)
@@ -584,11 +781,13 @@ void main() {
       S.lastT = S.t0
       window.addEventListener('resize', resize)
       resize()
+      setAccent(S.accentHue, S.accentBright) // upload the palette uniforms into the new GL
       if (!S.raf) S.raf = requestAnimationFrame(frame)
     } catch (err) {
       console.warn('veil: webgl unavailable, using css fog fallback', err)
       buildFog(true)
       if (!S.raf) S.raf = requestAnimationFrame(tickFallback)
+      setAccent(S.accentHue, S.accentBright) // re-tint the fallback fog
     }
   }
 
@@ -677,14 +876,29 @@ void main() {
   }
 
   // ---------------------------------------------------------- api
-  function show(text, done) {
+  // `accentHue` (0..360) + `accentBright` (−15..15), both from the
+  // user's side-panel accent settings, re-tint the whole effect. Omitted
+  // / non-finite keeps the original green (142, 0), which the lab uses for
+  // A/B parity against the pre-accent effect.
+  function show(text, done, accentHue, accentBright) {
+    // A veil already fully up (revealed, not melting, not fading) is
+    // updated in place: the label/dot refresh, but the field keeps flowing
+    // and the condensation is not replayed. The SW calls show() on every
+    // action of a turn — without this guard the effect would dissolve and
+    // re-condense on each one instead of holding for the whole turn.
+    const wasUp = !!(
+      S.root && S.root.isConnected && !S.melting &&
+      S.reveal >= 1 && S.root.style.opacity !== '0'
+    )
     ensure()
     if (S.mode === 'none') initGL()
+    setAccent(accentHue, accentBright)
     clearTimeout(S.fadeTimer)
     S.root.style.opacity = '1'
     S.pill.style.opacity = '1'
     const now = performance.now()
-    S.dot.style.background = done ? '#4ade80' : '#22c55e'
+    const p = S.pal
+    S.dot.style.background = rgb(done ? p.dotDone : p.dot)
     S.dot.style.animation = done ? 'none' : '__dshAugPulse 1.2s ease-in-out infinite'
     S.label.textContent = done ? 'Augmentor — done ✓' : `Augmentor — ${String(text)}`
     S.veil.style.opacity = '1'
@@ -693,7 +907,8 @@ void main() {
         S.melting = true
         S.meltStart = now
       }
-    } else {
+    } else if (!wasUp) {
+      // First show on this document, or resuming after "Done"/a fade:
       S.melting = false
       S.melt = 0
       S.revealStart = now
@@ -720,6 +935,7 @@ void main() {
       S.canvas = null
       S.gl = null
       S.atlas = null
+      S.fogDivs = []
       S.raf = 0
       S.melting = false
       S.melt = 0
@@ -738,6 +954,8 @@ void main() {
       return {
         mode: S.mode,
         var: VARIATION,
+        accent: S.accentHue,
+        accentBright: S.accentBright,
         tier: S.tier,
         fps: Math.round(S.fps),
         total: S.total,

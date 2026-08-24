@@ -2,3 +2,14 @@
 trace/
 sessions/
 *.log
+
+# Machine-local secrets / endpoints — never commit
+.env
+.browser-endpoint
+
+# Python bytecode
+__pycache__/
+*.pyc
+
+# Runtime scratch dir
+agent-workdir/

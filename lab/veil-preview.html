@@ -37,6 +37,11 @@
     background: rgba(255, 255, 255, 0.92); color: #22302a; cursor: pointer;
   }
   html.dark #bar button { background: rgba(20, 30, 25, 0.92); color: #cfe5da; border-color: rgba(120, 150, 135, 0.5); }
+  #acc { display: inline-flex; align-items: center; gap: 6px;
+    font: 600 12px/1 ui-monospace, monospace; color: #55605a; padding: 0 4px; }
+  html.dark #acc { color: #9db8ab; }
+  #accent { width: 120px; accent-color: #55605a; cursor: pointer; }
+  #accval { font-variant-numeric: tabular-nums; }
   #dbg {
     position: fixed; top: 14px; right: 14px; z-index: 10;
     font: 11px/1.5 ui-monospace, monospace; white-space: pre;
@@ -55,6 +60,8 @@
     <button data-act="var-frost">frost</button>
     <button data-act="var-glyphs">glyphs</button>
     <button data-act="var-fog">fog (v0.1.6)</button>
+    <label id="acc">accent hue <input id="accent" type="range" min="0" max="360" value="142"> <span id="accval">142</span></label>
+    <label id="acc">accent bright <input id="accbright" type="range" min="-15" max="15" value="0"> <span id="accbrightval">0</span></label>
   </div>
   <div id="dbg">veil: loading…</div>
 
@@ -103,12 +110,55 @@
   </script>
   <script>
     const V = () => window.__dshAugVeil;
+    // Accent hue: the same control the side panel has (default 142 = the
+    // original green, for A/B parity against the pre-accent effect).
+    // ?accent=<0..360> presets it. Passed to every show() call.
+    let accent = 142;
+    {
+      const raw = new URLSearchParams(location.search).get('accent');
+      // guard raw first: Number(null) is 0, which would silently mean red
+      if (raw != null) {
+        const a = Number(raw);
+        if (Number.isFinite(a) && a >= 0 && a < 360) accent = a;
+      }
+    }
+    // Accent brightness: same control the side panel has (default 0 = no
+    // offset). ?accbright=<-15..15> presets it. Passed to every show() call.
+    let accbright = 0;
+    {
+      const raw = new URLSearchParams(location.search).get('accbright');
+      if (raw != null) {
+        const b = Number(raw);
+        if (Number.isFinite(b) && b >= -15 && b <= 15) accbright = b;
+      }
+    }
+    const signed = (n) => (n > 0 ? `+${n}` : String(n));
+    const accentEl = document.getElementById('accent');
+    const accval = document.getElementById('accval');
+    accentEl.value = accent;
+    accval.textContent = String(accent);
+    accentEl.addEventListener('input', () => {
+      accent = Number(accentEl.value);
+      accval.textContent = String(accent);
+      // re-apply live if the veil is already up
+      if (V()) V().show('Clicking…', false, accent, accbright);
+    });
+    const accbrightEl = document.getElementById('accbright');
+    const accbrightval = document.getElementById('accbrightval');
+    accbrightEl.value = accbright;
+    accbrightval.textContent = signed(accbright);
+    accbrightEl.addEventListener('input', () => {
+      accbright = Number(accbrightEl.value);
+      accbrightval.textContent = signed(accbright);
+      if (V()) V().show('Clicking…', false, accent, accbright);
+    });
+    const show = (text, done) => V().show(text, done, accent, accbright);
     document.querySelectorAll('#bar button').forEach((b) => {
       b.addEventListener('click', () => {
         const a = b.dataset.act;
-        if (a === 'show') V().show('Clicking…', false);
-        if (a === 'type') V().show('Typing…', false);
-        if (a === 'done') V().show('Done', true);
+        if (a === 'show') show('Clicking…', false);
+        if (a === 'type') show('Typing…', false);
+        if (a === 'done') show('Done', true);
         if (a === 'fade') V().fade();
         if (a === 'dark') document.documentElement.classList.toggle('dark');
         if (a === 'var-frost' || a === 'var-glyphs' || a === 'var-fog') {
@@ -128,7 +178,7 @@
       dbg.textContent = d ? 'veil: ' + JSON.stringify(d) : 'veil: not loaded';
     }, 400);
     // auto-start: condense after the page settles
-    setTimeout(() => V().show('Clicking…', false), 350);
+    setTimeout(() => show('Clicking…', false), 350);
   </script>
 </body>
 </html>

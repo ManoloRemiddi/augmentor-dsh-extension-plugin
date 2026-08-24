@@ -20,27 +20,71 @@ agent** which controls the user's real browser.
   zero harness code changes. The production design will register real
   `browser_*` tools on `ctx.tools` and use the SDK transport's reserved
   server→client request channel instead of the HTTP relay.
-- The LLM is the local llama.cpp server (`http://127.0.0.1:8080/v1`,
-  `Qwen3.8-27B-UD-Q6_K_XL`) via a hand-declared `dsh-llm-pi-ai` route — no API
-  key, no network.
-- No prompt-cancel on the wire: "New chat" abandons the current session (fresh
-  `sessionId`, the runtime lazily creates a new agent+session pair) and clears
-  the panel; the old session simply goes idle server-side.
+- The model set mirrors the **DSH app's user plane**: the runtime mounts the
+  same plugins the app mounts (`dsh-settings-file` reads
+  `$DSH_HOME/settings.yaml`; `dsh-credentials-local` layers the process env
+  over `~/.dsh/.credentials.yaml` over `.env`), so the sidecar offers exactly
+  what the DSH app offers — the `llm-pi-ai:` routes in the user's settings
+  (the local llama.cpp models) plus the built-in `deepseek-official` route
+  (flash / flash-vision / pro, key resolved per request from the credential
+  store). No route is hand-declared in the sidecar composition, which is what
+  keeps the two from drifting. The composer strip's model chip is a **model
+  picker** (the DSH GUI's picker mirrored in plain HTML/JS): the bridge serves
+  the catalog from the settings document, the selection persists in
+  `chrome.storage.local`, and a mid-conversation switch restarts the runtime
+  process — the session keeps its id and resumes from its persisted log on the
+  new model.
+- The composer's **Stop** button aborts the live turn over the wire: a new
+  `session/interrupt` SDK RPC calls `agent.cancel({ kind: 'user' })`, which
+  aborts the active step and clears the pending inbox. The turn settles with a
+  `turn/end` (`reason.kind === 'aborted'`) and the agent returns to idle — the
+  **session and its context are preserved**, so the next prompt resumes the same
+  conversation. (This required a small DSH change: `session/interrupt` in the
+  SDK protocol + server, then a host-face rebuild — see *Dependencies*.) "New
+  chat" still abandons the session entirely (fresh `sessionId`, the runtime
+  lazily creates a new agent+session pair) and clears the panel; the old session
+  simply goes idle server-side.
 
 ## Files
 
 | File | Role |
 |---|---|
-| `bridge.mjs` | Native messaging host: Chrome port ⇄ runtime stdio re-framing + browser-action HTTP relay. Logs every frame to `trace/`. |
+| `bridge.mjs` | Native messaging host: Chrome port ⇄ runtime stdio re-framing + browser-action HTTP relay + the bridge-local model methods (`augmentor/models` serves the DSH app's catalog from `$DSH_HOME/settings.yaml`; `augmentor/switchModel` restarts the runtime process for the new selection). Logs every frame to `trace/`. |
 | `dsh-browser.mjs`, `bin/dsh-browser` | CLI the model runs via bash; POSTs to the bridge relay. |
 | `persona.md` | System prompt (browser-agent rules + dsh-browser usage). |
-| `extension/` | MV3 extension: `sw.js` (port owner + action executor + session owner, full session log with `sinceSeq`-trimmed sync, per-turn active-tab targeting incl. new-tab pages, on-page AI-control overlay: a **frost veil** — WebGL domain-warped heightfield lit as thin ice (moving specular glints, fresnel rim, cavity shadow, self-shadow) with a parallax depth-banded snowfall in front; condenses in (edges first) and melts out, low-resolution canvas with automatic quality drop; falls back to the legacy 3-layer CSS fog (same keyframes) without WebGL, under reduced motion, or behind the `__dshAugForceFog` test hook — + bottom-center status pill + click/type pulse-and-ripple, plain-language status labels (element text, never selectors); the indicator lives for the whole turn and fades only after "done"), `veil.js` (the frost veil itself, self-contained: GLSL shaders + CSS-fog fallback + pill + condense/melt lifecycle + optional glyph variation (the same waves rendered as a field of falling numbers/symbols, `window.__dshAugVariation = 'glyphs'`, off by default), idempotent, exposes `window.__dshAugVeil.{show,fade,pointer,debug}` and bridges live state to the main world via `root.dataset.veil`), `sidepanel.html`/`sidepanel.js` (side-panel chat UI, DSH-GUI parity: Think blocks, compact tool rows, stats line, light/dark theme toggle, jump-to-top), `chat-render.js` (renderer, stick-to-bottom scrolling), `theme-boot.js` (pre-paint theme restore; a file because MV3's extension-page CSP blocks inline scripts), `vendor/marked.min.js` (markdown, HTML-escaped before parse), `manifest.json`. |
+| `extension/` | MV3 extension: `sw.js` (port owner + action executor + session owner, full session log with `sinceSeq`-trimmed sync, per-turn active-tab targeting incl. new-tab pages, on-page AI-control overlay: a **frost veil** — WebGL domain-warped heightfield lit as thin ice (moving specular glints, fresnel rim, cavity shadow, self-shadow) with a parallax depth-banded snowfall in front; condenses in (edges first) and melts out, low-resolution canvas with automatic quality drop; falls back to the legacy 3-layer CSS fog (same keyframes) without WebGL, under reduced motion, or behind the `__dshAugForceFog` test hook — + bottom-center status pill + click/type pulse-and-ripple, plain-language status labels (element text, never selectors); the indicator lives for the whole turn and fades only after "done"; the veil's palette and the pulse/ripple colors follow the user's **accent** (hue + brightness) — synced from `chrome.storage.local` at boot and on change (the `storage` permission is mandatory: without it `chrome.storage` is undefined in the SW and an unguarded read throws), always passed to the injected `show(text, done, hue, bright)`), `veil.js` (the frost veil itself, self-contained: GLSL shaders + CSS-fog fallback + pill + condense/melt lifecycle + optional glyph variation (the same waves rendered as a field of falling numbers/symbols, `window.__dshAugVariation = 'glyphs'`, off by default), idempotent, **all 16 palette colors are derived from the accent** — each role is the accent hue plus a fixed offset/sat/light triple (lightness then shifted by the accent brightness: the + side headroom-scaled so the extremes can't merge, the − side fading to full black — at −15 every role is pure black), so the palette's internal spread is preserved for any accent (142/0 reproduces the original green exactly); `show(text, done, hue, bright)` re-tints live: pill/label, fog divs, and the GL uniforms (frost + snow, program re-bound before upload), hue/brightness omitted ⇒ 142/0 for lab parity; exposes `window.__dshAugVeil.{show,fade,pointer,debug}` and bridges live state incl. the active hue + brightness to the main world via `root.dataset.veil`), `sidepanel.html`/`sidepanel.js` (side-panel chat UI, DSH-GUI parity: Think blocks, compact tool rows, stats line, **hue icon + color popover** (Light/Dark theme switch at the top, then neutral-surface hue 0–360 + brightness −15..+15, accent hue with swatch + accent brightness −15..+15 — the − side fades to full black — all with live readouts, mini veil-pill preview, reset), jump-to-top), `chat-render.js` (renderer, stick-to-bottom scrolling), `theme-tokens.js` (shared color math — the single source of truth for the tunable palette: HSL→RGB, per-theme neutral surface tokens with headroom-scaled brightness (offset is scaled so the extremes can't clamp-collapse the layer spacing), per-theme accent triples (shipped brand exact in both themes) + accent brightness (`accentLight`: + side additive, − side fades to full black), the 16-role veil palette spec + headroom-scaled brightness; `panelTheme`/`applyPanelTheme`/`veilPalette`; loaded by theme-boot.js, sidepanel.js and — via `importScripts` — sw.js; the copy in veil.js must stay in sync), `theme-boot.js` (pre-paint restore of theme + all four color settings from localStorage; a file because MV3's extension-page CSP blocks inline scripts), `vendor/marked.min.js` (markdown, HTML-escaped before parse), `manifest.json` (permissions incl. `storage` — required for the SW's accent sync). |
 | `install-native-host.sh` | Writes the native host manifest into the Chromium profile. |
 | `cdp.mjs`, `lab-overlay-verify.py` | Lab tools (not shipped): CDP helper (`targets`/`newtab`/`eval`/`shot`/`bcmd`) and the overlay verification driver (DOM + pixel assertions; mode-branching snap stage: webgl asserts canvas + live frame counter, fallback asserts the 3-layer CSS fog). |
-| `lab/veil-preview.html`, `lab/veil-metrics.py` | Lab tools (not shipped): A/B preview page for the veil (light/dark page, show/done/fade/dark + frost/glyphs/fog switcher, live debug readout; `?mode=fog` forces the CSS-fog fallback, `?mode=glyphs` the characters variation) and the quantitative screenshot metrics (relief, texture, green dominance, see-through correlation, parallax/flow diffs — the stand-in for visual inspection). |
+| `lab/veil-preview.html`, `lab/veil-metrics.py` | Lab tools (not shipped): A/B preview page for the veil (light/dark page, show/done/fade/dark + frost/glyphs/fog switcher, live debug readout; `?mode=fog` forces the CSS-fog fallback, `?mode=glyphs` the characters variation, **`?accent=<hue>` / `?accbright=<-15..15>` set the accent** — plus live accent hue + brightness sliders in the bar that re-tints the running veil) and the quantitative screenshot metrics (relief, texture, green dominance, see-through correlation, parallax/flow diffs — the stand-in for visual inspection). |
 | `../deepseek-harness/examples/jsonrpc-agent/augmentor.cordis.yml` | Runtime composition (untracked file in the repo). |
 | `trace/*.jsonl` | Per-run frame traces (bridge; every wire frame, both directions). |
 | `sessions/*.jsonl` | Runtime session logs (uncompressed for inspection). |
+
+## DSH runtime dependency
+
+The sidecar runs a **local clone** of `deepseek-harness` (resolved by
+`bridge.mjs` from `$DSH_AUGMENTOR_CLONE`, default `../deepseek-harness`). The
+runtime loads the **built `lib/`** artifacts of that clone, not source, and the
+`session/interrupt` method used by the Stop button lives in two files that are
+not part of stock DSH:
+
+- `packages/sdk/protocol/src/types.ts` — `SessionInterruptParams` /
+  `SessionInterruptResult` + the `'session/interrupt'` request-map entry.
+- `packages/sdk/server/src/server.ts` — the `session/interrupt` handler, which
+  calls `agent.cancel({ kind: 'user' })` and reports `interrupted` from
+  `agent.status === 'running'`.
+
+If you re-clone or update `deepseek-harness`, re-apply those two edits and
+rebuild the host face from the clone root:
+
+```sh
+cd deepseek-harness
+npm run build:lib:host      # = tsc -b tsconfig.host.json && tsdown --env.DSH_BUILD_FACE host
+```
+
+Without the rebuild the runtime answers `session/interrupt` with
+`unknown DeepSeek Harness SDK runtime method` and Stop fails open (the turn
+keeps running).
 
 ## 1. Browser leg (real Chromium)
 
@@ -57,7 +101,12 @@ agent** which controls the user's real browser.
    the bridge, which spawns the runtime). Send a prompt, e.g.
    `Open https://example.com and tell me the page title.`
    *＋ New chat* in the header starts a fresh session (UI reset, stats restart,
-   new `sessionId` on the wire). The strip under the composer mirrors the DSH
+   new `sessionId` on the wire). While a turn runs, the composer's **Send** button
+    is replaced by a **■ Stop** button: clicking it aborts the live turn (the
+    on-page overlay reads "Stopped" and the status returns to *connected*), and
+    the session stays live — the composer remains usable, so a new prompt
+    (Enter) resumes it with full context. *Stop* while idle is a no-op
+    (`interrupted: false`). The strip under the composer mirrors the DSH
    web GUI: access mode (`Full access` — the Augmentor runtime mounts no
    fs-sandbox/approval gates, so that is the honest label), model, and the
    stats line (`N turns · N steps | LLM … · Tool call … | TTFT avg … · …
@@ -137,6 +186,53 @@ agent** which controls the user's real browser.
   task. Persona robustness is decent; still, the first-call cost was one
   wasted LLM round trip (~2-4s, 30-100 tokens).
 
+### Model picker (the DSH app's model set, selectable)
+
+The composer strip's model chip is a picker — the DSH web GUI's model seat
+mirrored in plain HTML/JS: a grouped menu (one section per provider route), a
+check on the running model, a loading/error + retry strip, and a locked
+state while a turn runs (a switch would restart the runtime under the live
+turn, so switches land only when idle).
+
+- **Catalog source**: the bridge answers `augmentor/models` by reading
+  `$DSH_HOME/settings.yaml` (default `~/.dsh/settings.yaml`) — the SAME
+  document the DSH app loads — grouping its `llm-pi-ai:` provider routes as
+  configured (display names, model names, order), then appending the built-in
+  `deepseek-official` route (deepseek-v4-flash / deepseek-v4-pro /
+  deepseek-v4-flash-vision-exp, the plugin's default catalog unless a
+  `llm-deepseek.models` settings section overrides it). The file is re-read
+  per request, so an edit to the DSH app's settings lands in the picker
+  without a reload. The runtime side is the product's canonical wiring
+  (`dsh-settings-file` + `dsh-credentials-local` + dormant `dsh-llm-pi-ai` +
+  `dsh-llm-deepseek`): which routes exist is the user's settings document,
+  never the sidecar composition.
+- **Keys**: each route's `apiKeyEnv` reference resolves per request through
+  the DSH credentials seam (process env > `~/.dsh/.credentials.yaml` >
+  `augmentor/.env`) — the same store the DSH app's Models page writes. The
+  local llama.cpp route ships a placeholder key in `augmentor/.env` (the
+  server ignores auth); the gx10 gateway route needs the real key exported in
+  the launching shell; DeepSeek needs nothing (its key is in the store).
+- **Default**: the first model of the first route in the settings document
+  (local first — no network needed), i.e. the DSH app's first-configured
+  model. The last pick persists in `chrome.storage.local` and wins on
+  reconnect while it is still in the catalog.
+- **Switch semantics**: picking a row sends it to the bridge
+  (`augmentor/switchModel`), which validates it against the catalog and
+  restarts the runtime process (SIGTERM, SIGKILL after 5 s — the Chrome port
+  and the browser relay stay up). The extension re-`initialize`s the fresh
+  process with the new selection; the session id is unchanged, so the runtime
+  **resumes the conversation from its persisted log** (`sessions/*.jsonl`) on
+  the new model — context preserved, next reply from the new model. The
+  bridge answers `switchModel` once the new process is spawned (the
+  re-initialize frame is pipe-buffered until the runtime boots, ~200 ms). A
+  failed switch rolls the selection back and surfaces the error; if the
+  runtime is left unusable the panel drops to the error state and *Connect*
+  reboots the pair.
+- **Wire**: `augmentor/models` and `augmentor/switchModel` are bridge-local —
+  answered by the bridge itself, never forwarded to the runtime (whose method
+  map is the fixed SDK set: `initialize` / `session/prompt` /
+  `session/interrupt` / `shutdown`).
+
 ## 2. Real-browser results (headless Chromium lab + local 27B)
 
 All numbers below are from real Chromium runs (headless `--load-extension`,
@@ -207,6 +303,94 @@ llama.cpp `Qwen3.8-27B-UD-Q6_K_XL`.
   pre-paint on a fresh load (no flash). The restore must live in
   `theme-boot.js`: MV3's default extension-page CSP (`script-src 'self'`)
   silently refuses inline `<script>` in extension pages.
+ - **Color customization verified (lab):** a hue icon (rainbow conic disc)
+   in the header opens a color popover — a Light/Dark **theme switch**
+   (segmented control, at the top, so the theme can be toggled while the
+   colors are open) above four color controls — over the otherwise-gray
+   surfaces, all persisted to localStorage (pre-paint restore) and mirrored
+   to `chrome.storage.local` for the SW:
+   - *Neutral hue* (0–360): tints `--bg`/`--layer1..3`/scrollbar thumbs;
+     per-level saturation keeps a chosen hue readable in both themes while
+     the default 222 reproduces the shipped near-neutral grays.
+   - *Brightness* (−15..+15 lightness points, one control for BOTH themes):
+     headroom-scaled — the raw offset is scaled down before application so
+     the extremes can't push levels into the 2..100 clamp and collapse the
+     layer spacing (the unscaled light +15 turned every surface white;
+     unscaled dark −15 pinned the bottom levels). After scaling, every
+     offset ±15 in both themes keeps all levels in range with the exact
+     designed lightness deltas. Consequence: in light mode the top level is
+     already at 100, so the + side gracefully no-ops (white cannot be
+     brighter) while −15..0 works fully; dark gets the full ±15.
+   - *Accent hue* (0–360, default 222 = DeepSeek blue, swatch preview):
+     drives `--brand` in the panel — per-theme `[hueOffset, sat, light]`
+     triples keep the shipped brand **exact** in both themes at the default
+     (dark `rgb(86,134,254)`, light `rgb(65,118,230)`) — and the
+     browser-control overlay: the veil's whole 16-color palette is derived
+     from the accent (each role = accent + fixed offset/sat/light, so the
+     original green's internal spread is preserved for any hue; at 142 the
+     derived dot/done/label/pill colors match the shipped green with Δ0),
+     and the click/type pulse + ripple use the same accent dot color.
+   - *Accent brightness* (−15..+15, default 0): shifts the accent's
+     lightness in both themes, for `--brand` **and** the overlay. The +
+     side is additive (the brand is one mid-range color, so a plain clamp
+     suffices: red hue 0 at +15 → `rgb(255,164,162)`); the veil's + side is
+     headroom-scaled like the neutral brightness — its roles span
+     lightness 3.1..93.9, so unscaled +15 would white-out the extremes;
+     after scaling (×6.1/15) every role keeps its designed delta and +15
+     lands the brightest role at exactly 100. The − side fades
+     **multiplicatively to full black** (`accentLight`): at the slider
+     minimum (−15) the accent — brand and all 16 veil roles — reaches
+     lightness 0 (`rgb(0,0,0)`) in both themes, intermediate steps dim the
+     whole palette uniformly (spacing preserved proportionally), and the
+     curve is continuous at 0 (e.g. dark blue brand: −7 → `rgb(1,52,181)`,
+     −15 → `rgb(0,0,0)`).
+   Verified end-to-end (real Chromium, `--headless=new` + CDP): popover
+   open/close (click, outside mousedown, Esc), the Light/Dark theme switch
+   at the top (both directions, active-segment state, localStorage
+   round-trip), all four sliders live (surface tint, brand + swatch, mini
+   veil-pill preview, both brightness readouts) — accent brightness fading
+   to pure black at −15 in both themes (brand, mini pill, and the injected
+   overlay's dot/label/pill all `rgb(0,0,0)`) — reset, and the
+   previously-broken light +15 whiteout.
+   Persistence round-trips to both localStorage (pre-paint restore) and
+   `chrome.storage.local`; the SW boots the accent hue + brightness from
+   `chrome.storage.local` and follows
+   `storage.onChanged` (area-filtered to `local`; invalid/out-of-range
+   values ignored) — click-pulse and the injected
+   `show(text, done, hue, bright)` args track the user's accent live. The
+   veil re-tints live on `show()` — pill, label, fog divs, and the GL
+   uniforms; the uniform upload re-binds each program first (a `uniform3f`
+   for a non-bound program is a silent no-op, and `frame()` leaves the
+   snow program bound — the first bug the hue check caught: the sheet
+   stayed green while the pill turned blue).
+   `root.dataset.veil` gains additive `a` (active hue) and `b` (active
+   brightness) fields; the two palette implementations (theme-tokens.js
+   and the compact copy in veil.js) were cross-checked sample-for-sample —
+   714 identical role colors across 42 hue×brightness combos.
+   `lab-overlay-verify.py` is accent-aware (expected dot/pulse colors
+   computed in Python with the same HSL→RGB, hue-agnostic saturation pixel
+   tests), and `lab/veil-preview.html` takes `?accent=<hue>` /
+   `?accbright=<-15..15>` plus live sliders.
+  - **Connect regression found & fixed (real Chromium):** adding the accent
+    sync made the SW read `chrome.storage.local` at boot — but the manifest
+    had no `"storage"` permission, where `chrome.storage` is *undefined*
+    (not merely restricted) and the property read throws synchronously.
+    Unguarded, that throw killed the SW before it registered
+    `chrome.runtime.onMessage`, so the panel's `connect` message had no
+    receiving end and the agent could never connect. Node stub tests can't
+    catch this (they stub `chrome` wholesale) — reproduced and verified in
+    real `chromium --headless=new` via CDP: pre-fix, `Uncaught TypeError:
+    Cannot read properties of undefined (reading 'local')` in sw.js and no
+    SW target; post-fix (`"storage"` added to manifest permissions + the
+    `syncAccent()`/`onChanged` block wrapped in try/catch so the accent can
+    never take the agent down), the SW boots clean, the full round-trip
+    works (panel → SW → `connectNative` → bridge → daemon → status
+    "connected"), and the accent persists to
+    `chrome.storage.local` in the real SW context.
+  - Fresh-profile bugs found while verifying: `Number(null) === 0` made
+    *absent* settings mean "hue 0" (everything red on first launch) —
+    fixed by guarding the raw string in theme-boot.js/sidepanel.js/the
+    preview; and the light +15 whiteout above.
 - **Stick-to-bottom scrolling verified (lab):** the old code force-scrolled on
   *every* log apply — including the 2 s poll — which yanked the reader back to
   the bottom mid-read. Now the log follows the live tail only while the user

@@ -7,9 +7,17 @@
  * actions the runtime requests via the bridge.
  */
 
+// Shared color math (theme-tokens.js): the veil's accent palette and the
+// click-pulse colors derive from the user's accent hue.
+importScripts('theme-tokens.js')
+
 const HOST = 'com.deepseek.dsh.augmentor'
-const PROVIDER = 'local-qwen'
-const MODEL = 'Qwen3.8-27B-UD-Q6_K_XL'
+// The model the sidecar runs on: a {provider, model} pair from the DSH app's
+// catalog (the bridge serves it from $DSH_HOME/settings.yaml, so the picker
+// offers exactly what the DSH app offers). The choice is remembered in
+// chrome.storage.local so an SW restart (idle expiry, browser restart)
+// resumes the last selection.
+const MODEL_STORAGE_KEY = 'augmentor-model-selection'
 
 // ResonantOS-style behavior: clicking the toolbar icon opens the side panel
 // (the manifest no longer declares a default_popup, which would take
@@ -32,6 +40,11 @@ const state = {
   port: null,
   reqSeq: 0,
   pending: new Map(), // id -> {method, resolve}
+  // The DSH app's model catalog (the bridge's `augmentor/models` result) and
+  // the selected {provider, model} the runtime runs on (null until the first
+  // handshake). The panel's picker renders from both.
+  catalog: null,
+  selection: null,
   // Session entries the panel renders (events + port/prompt/handshake/status).
   // Big on purpose: a fresh panel load replays this as the whole chat, so it
   // must hold a full working session (~2 entries per streamed chunk).
@@ -61,6 +74,29 @@ function broadcast(entry = null) {
   chrome.runtime
     .sendMessage({ type: 'evt', running: state.running, phase: state.phase, error: state.error, entry })
     .catch(() => {})
+}
+
+// Remembered model selection: the SW restarts constantly (idle expiry,
+// browser restart), and the last pick must survive them.
+function loadStoredSelection() {
+  return new Promise((resolve) => {
+    try {
+      chrome.storage.local.get(MODEL_STORAGE_KEY, (items) => {
+        const sel = items?.[MODEL_STORAGE_KEY]
+        resolve(sel && typeof sel.provider === 'string' && typeof sel.model === 'string' ? sel : null)
+      })
+    } catch {
+      resolve(null)
+    }
+  })
+}
+function saveSelection(sel) {
+  if (sel === null) return
+  try {
+    chrome.storage.local.set({ [MODEL_STORAGE_KEY]: sel }, () => void chrome.runtime.lastError)
+  } catch {
+    /* storage unavailable: the selection lives in this SW instance only */
+  }
 }
 
 function ensurePort() {
@@ -125,26 +161,47 @@ function ensurePort() {
     fail(err ?? 'native host disconnected')
   })
 
-  function fail(message) {
-    state.phase = 'error'
-    state.error = message
-    state.port = null
-    state.pending.forEach((w) => w.reject(new Error(message)))
-    state.pending.clear()
-    broadcast()
-  }
-
-  // Handshake: the runtime serves no other client, so initialize now.
-  request('initialize', {
-    cwd: 'chrome-extension://augmentor',
-    provider: PROVIDER,
-    model: MODEL,
-  })
-    .then((result) => {
+  // Handshake: the bridge serves the model catalog before the runtime is
+  // needed, so fetch it first, pick the model (the remembered selection when
+  // it is still in the catalog, else the catalog's default — the DSH app's
+  // first-configured model), and only then initialize the runtime with it.
+  ;(async () => {
+    const stored = await loadStoredSelection()
+    try {
+      const catalog = await request('augmentor/models')
+      const groups = Array.isArray(catalog?.groups) ? catalog.groups : []
+      const inCatalog = (sel) =>
+        sel !== null &&
+        groups.some((g) => g.provider === sel.provider && g.models.some((m) => m.model === sel.model))
+      const sel = inCatalog(stored) ? stored : catalog?.default
+      if (!sel || !groups.length) {
+        throw new Error(catalog?.error ?? 'no models available (check $DSH_HOME/settings.yaml)')
+      }
+      state.catalog = groups
+      state.selection = sel
+      saveSelection(sel)
+      const result = await request('initialize', {
+        cwd: 'chrome-extension://augmentor',
+        provider: sel.provider,
+        model: sel.model,
+      })
       state.phase = 'ready'
-      broadcast(log('handshake', { serverInfo: result.serverInfo }))
-    })
-    .catch((e) => fail(`initialize failed: ${e.message}`))
+      broadcast(log('handshake', { serverInfo: result.serverInfo, provider: sel.provider, model: sel.model }))
+    } catch (e) {
+      fail(`initialize failed: ${e.message}`)
+    }
+  })()
+}
+
+// Drop to the error state: the panel shows the message + a Connect button
+// whose press re-runs the whole handshake (fresh port, fresh selection check).
+function fail(message) {
+  state.phase = 'error'
+  state.error = message
+  state.port = null
+  state.pending.forEach((w) => w.reject(new Error(message)))
+  state.pending.clear()
+  broadcast()
 }
 
 function post(msg) {
@@ -197,7 +254,12 @@ function onSessionEvent(params) {
   // "Done ✓" on the user's tab.
   if (ev?.type === 'turn/end') {
     turnActive = false
-    if (overlayVisible) overlayShow(overlayTabId, 'Done ✓', true)
+    if (overlayVisible) {
+      // A user Stop aborts the turn — label it as such, not "Done".
+      const reason = ev?.data?.reason
+      const stopped = reason?.kind === 'aborted' && reason?.reason?.kind === 'user'
+      overlayShow(overlayTabId, stopped ? 'Stopped' : 'Done ✓', true)
+    }
   }
   // Full envelope: the panel renders from it and the seq is its dedupe key.
   broadcast(log('event', { sessionId: params?.sessionId, event: ev }))
@@ -337,12 +399,55 @@ function inject(tabId, func, args = []) {
 const OVERLAY_ID = '__dshAugOverlay'
 const OVERLAY_FADE_MS = 4000 // after an action OUTSIDE a turn (direct relay)
 const OVERLAY_DONE_MS = 2500 // after "Done" at turn end
+
+// Accent hue (0..360) chosen in the side panel's color popover: it themes
+// the veil (passed to show()) and the click/type pulse. The panel mirrors
+// its localStorage settings into chrome.storage.local because the SW is a
+// separate context that cannot read the page's localStorage.
+let accentHue = globalThis.__dshAugTheme.DEFAULTS.accentHue
+let accentBright = globalThis.__dshAugTheme.DEFAULTS.accentBright
+function syncAccent() {
+  chrome.storage.local
+    .get(['augmentor-accent-hue', 'augmentor-accent-bright'])
+    .then((s) => {
+      s = s || {}
+      const h = Number(s['augmentor-accent-hue'])
+      if (Number.isFinite(h) && h >= 0 && h < 360) accentHue = h
+      const b = Number(s['augmentor-accent-bright'])
+      if (Number.isFinite(b) && b >= -15 && b <= 15) accentBright = b
+    })
+    .catch(() => {})
+}
+// Guarded at every call site: without the "storage" permission
+// (or in a context where the API is absent) chrome.storage is UNDEFINED
+// and the property read throws synchronously — an unguarded top-level
+// throw here would kill the SW before it registers its message listener,
+// and the panel could never connect. Accent color must never take the
+// agent down with it.
+try {
+  syncAccent()
+  chrome.storage.onChanged.addListener((changes, area) => {
+    if (area === 'local' && (changes['augmentor-accent-hue'] || changes['augmentor-accent-bright']))
+      syncAccent()
+  })
+} catch { /* storage API unavailable: keep the default accent */ }
+
+// "rgba(r, g, b" prefix of the accent pulse color (the veil's dot color),
+// computed from the live accent hue at each action.
+function pulseRgba() {
+  const c = globalThis.__dshAugTheme.veilPalette(accentHue, accentBright).dot
+  return `rgba(${c[0]}, ${c[1]}, ${c[2]}`
+}
+
 let overlayTimer = null
 let overlayTabId = null
 // True while the veil is (expected to be) on screen. Gates the turn-end
 // "Done ✓": a text-only turn never raised the veil, so there is nothing to
 // report at its end.
 let overlayVisible = false
+// The status line the veil was last told to show (the early re-show after a
+// navigation needs it so the fresh document gets the right label).
+let overlayText = ''
 // True from prompt to turn/end. While a turn runs, browser actions must NOT
 // arm the idle fade — or the veil would flicker off between steps.
 let turnActive = false
@@ -358,12 +463,14 @@ function overlayShow(tabId, text, done = false) {
   clearTimeout(overlayTimer)
   overlayTabId = tabId
   overlayVisible = true
+  overlayText = String(text)
   injectFiles(tabId, ['veil.js'])
     .then(() =>
       inject(
         tabId,
-        (text, done) => (window.__dshAugVeil ? window.__dshAugVeil.show(text, done) : 'no-veil'),
-        [String(text), done],
+        (text, done, hue, bright) =>
+          window.__dshAugVeil ? window.__dshAugVeil.show(text, done, hue, bright) : 'no-veil',
+        [String(text), done, accentHue, accentBright],
       ),
     )
     .catch(() => {})
@@ -392,6 +499,35 @@ function overlayFade(tabId) {
     [OVERLAY_ID],
   ).catch(() => {})
 }
+
+// A navigation of the work tab destroys the document — and the veil with
+// it. Re-raise the veil as soon as the NEW document is loading, instead of
+// waiting for full page load: while a turn runs, the effect must hold
+// across page changes. At 'loading' the document may not be committed yet
+// (script injection fails), so retry briefly; the navigate handler's own
+// show-after-load stays as the backstop.
+let earlyShowTries = 0
+function earlyShowRetry(tabId) {
+  if (!turnActive || !overlayVisible || tabId !== overlayTabId) return
+  if (earlyShowTries > 10) return
+  earlyShowTries++
+  injectFiles(tabId, ['veil.js'])
+    .then(() =>
+      inject(
+        tabId,
+        (text, hue, bright) =>
+          window.__dshAugVeil ? window.__dshAugVeil.show(text, false, hue, bright) : 'no-veil',
+        [overlayText, accentHue, accentBright],
+      ),
+    )
+    .catch(() => setTimeout(() => earlyShowRetry(tabId), 200))
+}
+chrome.tabs.onUpdated.addListener((tabId, info) => {
+  if (info.status === 'loading' && tabId === overlayTabId && turnActive && overlayVisible) {
+    earlyShowTries = 0
+    earlyShowRetry(tabId)
+  }
+})
 
 // Human status line for the badge, per browser action. Deliberately plain
 // language — no selectors, no CSS — the badge is for the human, the model
@@ -462,6 +598,10 @@ async function handleBrowserAction(id, params) {
         } catch {
           tab = await chrome.tabs.create({ url, active: true })
           workTabId = tab.id
+          // Claim the new tab as the overlay tab NOW: its first document
+          // fires 'loading' while it loads, and the early re-show above
+          // will raise the veil there as soon as it can.
+          overlayShow(tab.id, overlayTextFor('navigate', params))
           const created = await waitForLoad(tab.id, url)
           overlayShow(tab.id, overlayTextFor('navigate', params, 'after'))
           out = { tabId: tab.id, url: created.url ?? url, title: created.title ?? null, newTab: true }
@@ -504,7 +644,7 @@ async function handleBrowserAction(id, params) {
         overlayShow(tab.id, overlayTextFor('click', params))
         out = await inject(
           tab.id,
-          (selector) => {
+          (selector, pulse) => {
             const el = document.querySelector(selector)
             if (!el) return { ok: false, error: `no element matches selector: ${selector}` }
             const humanName = (e) => {
@@ -517,14 +657,15 @@ async function handleBrowserAction(id, params) {
               const tag = e.tagName.toLowerCase()
               return tag === 'input' || tag === 'textarea' ? 'the input box' : 'the ' + tag
             }
-            // Visual: scroll the target into view, pulse it, ripple ring.
+            // Visual: scroll the target into view, pulse it, ripple ring —
+            // in the user's accent color (the "rgba(r, g, b" prefix).
             try {
               el.scrollIntoView({ block: 'center', behavior: 'instant' })
               el.animate(
                 [
-                  { boxShadow: '0 0 0 0 rgba(34,197,94,0)' },
-                  { boxShadow: '0 0 0 6px rgba(34,197,94,0.65)' },
-                  { boxShadow: '0 0 0 0 rgba(34,197,94,0)' },
+                  { boxShadow: `0 0 0 0 ${pulse}, 0)` },
+                  { boxShadow: `0 0 0 6px ${pulse}, 0.65)` },
+                  { boxShadow: `0 0 0 0 ${pulse}, 0)` },
                 ],
                 { duration: 900, iterations: 2 },
               )
@@ -533,7 +674,7 @@ async function handleBrowserAction(id, params) {
               r.style.cssText =
                 `position:fixed;left:${b.left + b.width / 2}px;top:${b.top + b.height / 2}px;` +
                 'width:14px;height:14px;margin:-7px 0 0 -7px;border-radius:50%;' +
-                'border:2px solid rgba(34,197,94,0.9);pointer-events:none;z-index:2147483647;'
+                `border:2px solid ${pulse}, 0.9);pointer-events:none;z-index:2147483647;`
               ;(document.body ?? document.documentElement).append(r)
               r.animate(
                 [{ transform: 'scale(1)', opacity: 1 }, { transform: 'scale(7)', opacity: 0 }],
@@ -548,7 +689,7 @@ async function handleBrowserAction(id, params) {
               name: humanName(el),
             }
           },
-          [String(params.selector ?? '')],
+          [String(params.selector ?? ''), pulseRgba()],
         )
         if (out?.ok) overlayShow(tab.id, overlayTextFor('click', params, 'after', out))
         break
@@ -558,7 +699,7 @@ async function handleBrowserAction(id, params) {
         overlayShow(tab.id, overlayTextFor('type', params))
         out = await inject(
           tab.id,
-          (selector, text) => {
+          (selector, text, pulse) => {
             const el = document.querySelector(selector)
             if (!el) return { ok: false, error: `no element matches selector: ${selector}` }
             const humanName = (e) => {
@@ -571,15 +712,15 @@ async function handleBrowserAction(id, params) {
               const tag = e.tagName.toLowerCase()
               return tag === 'input' || tag === 'textarea' ? 'the input box' : 'the ' + tag
             }
-            // Visual: same pulse+ripple as click, so the user sees where
-            // the text lands.
+            // Visual: same pulse+ripple as click (accent-colored), so the
+            // user sees where the text lands.
             try {
               el.scrollIntoView({ block: 'center', behavior: 'instant' })
               el.animate(
                 [
-                  { boxShadow: '0 0 0 0 rgba(34,197,94,0)' },
-                  { boxShadow: '0 0 0 6px rgba(34,197,94,0.65)' },
-                  { boxShadow: '0 0 0 0 rgba(34,197,94,0)' },
+                  { boxShadow: `0 0 0 0 ${pulse}, 0)` },
+                  { boxShadow: `0 0 0 6px ${pulse}, 0.65)` },
+                  { boxShadow: `0 0 0 0 ${pulse}, 0)` },
                 ],
                 { duration: 900, iterations: 2 },
               )
@@ -588,7 +729,7 @@ async function handleBrowserAction(id, params) {
               r.style.cssText =
                 `position:fixed;left:${b.left + b.width / 2}px;top:${b.top + b.height / 2}px;` +
                 'width:14px;height:14px;margin:-7px 0 0 -7px;border-radius:50%;' +
-                'border:2px solid rgba(34,197,94,0.9);pointer-events:none;z-index:2147483647;'
+                `border:2px solid ${pulse}, 0.9);pointer-events:none;z-index:2147483647;`
               ;(document.body ?? document.documentElement).append(r)
               r.animate(
                 [{ transform: 'scale(1)', opacity: 1 }, { transform: 'scale(7)', opacity: 0 }],
@@ -602,7 +743,7 @@ async function handleBrowserAction(id, params) {
             el.dispatchEvent(new Event('change', { bubbles: true }))
             return { ok: true, tag: el.tagName.toLowerCase(), name: humanName(el) }
           },
-          [String(params.selector ?? ''), String(params.text ?? '')],
+          [String(params.selector ?? ''), String(params.text ?? ''), pulseRgba()],
         )
         if (out?.ok) overlayShow(tab.id, overlayTextFor('type', params, 'after', out))
         break
@@ -675,7 +816,14 @@ function waitForLoad(tabId, expectedUrl, timeoutMs = 20000) {
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   if (msg?.type === 'connect') {
     ensurePort()
-    sendResponse({ phase: state.phase, error: state.error, running: state.running, sessionId: SESSION_ID, model: MODEL })
+    sendResponse({
+      phase: state.phase,
+      error: state.error,
+      running: state.running,
+      sessionId: SESSION_ID,
+      model: state.selection,
+      models: state.catalog,
+    })
     return
   }
   if (msg?.type === 'prompt') {
@@ -704,6 +852,28 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       .catch((e) => sendResponse({ ok: false, error: e.message }))
     return true // async
   }
+  if (msg?.type === 'stop') {
+    // Abort the live turn. The runtime records a `turn/end` (aborted, user
+    // cause) that settles the veil and returns the agent to idle — the session
+    // and its context are preserved, so the next prompt resumes seamlessly.
+    if (state.phase !== 'ready') {
+      sendResponse({ ok: false, error: state.error ?? `not ready (phase: ${state.phase})` })
+      return
+    }
+    // Drop the mid-turn guard now so a straggler browser action can't re-arm
+    // the idle fade; the turn/end event does the same, idempotently.
+    turnActive = false
+    request('session/interrupt', { sessionId: SESSION_ID })
+      .then((receipt) => {
+        broadcast(log('stop', { interrupted: receipt?.interrupted ?? false }))
+        sendResponse({ ok: true, interrupted: receipt?.interrupted ?? false })
+      })
+      .catch((e) => {
+        log('stop', { error: e.message })
+        sendResponse({ ok: false, error: e.message })
+      })
+    return true // async
+  }
   if (msg?.type === 'log') {
     // Full history by default (fresh panel load replays the whole chat); a
     // sinceSeq from a panel that already rendered up to that seq trims the
@@ -711,8 +881,105 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     const since = Number.isFinite(msg.sinceSeq) ? msg.sinceSeq : -1
     const entries =
       since < 0 ? state.log : state.log.filter((e) => e.kind === 'event' && e.event?.seq > since)
-    sendResponse({ log: entries, phase: state.phase, error: state.error, running: state.running })
+    sendResponse({
+      log: entries,
+      phase: state.phase,
+      error: state.error,
+      running: state.running,
+      model: state.selection,
+      models: state.catalog,
+    })
     return
+  }
+  if (msg?.type === 'models') {
+    // The picker's catalog + selection. Answered from memory when the
+    // handshake already fetched it; otherwise a fresh bridge call (the panel
+    // may open before the handshake lands, and the bridge serves the catalog
+    // before the runtime is up, so the call is safe in 'connecting' too).
+    const respond = (groups, error) =>
+      sendResponse({ ok: groups !== null, groups, selection: state.selection, error: error ?? null })
+    if (state.catalog) return respond(state.catalog, null)
+    if (!state.port) {
+      sendResponse({ ok: false, groups: null, selection: state.selection, error: state.error ?? `not ready (phase: ${state.phase})` })
+      return
+    }
+    request('augmentor/models')
+      .then((catalog) => {
+        state.catalog = Array.isArray(catalog?.groups) ? catalog.groups : []
+        respond(state.catalog, catalog?.error ?? null)
+      })
+      .catch((e) => sendResponse({ ok: false, groups: null, selection: state.selection, error: e.message }))
+    return true // async
+  }
+  if (msg?.type === 'model') {
+    // Model switch (the panel's picker). The bridge restarts the runtime so
+    // the new model reaches the CURRENT session — which resumes from its
+    // persisted log — and we re-initialize the fresh process with the new
+    // selection. Switches only land while the turn is idle.
+    if (state.phase !== 'ready') {
+      sendResponse({ ok: false, error: state.error ?? `not ready (phase: ${state.phase})` })
+      return
+    }
+    if (state.running) {
+      sendResponse({ ok: false, error: 'finish the current turn before switching models' })
+      return
+    }
+    const provider = msg.provider
+    const model = msg.model
+    const known =
+      state.catalog?.some((g) => g.provider === provider && g.models.some((m) => m.model === model)) ?? false
+    if (!known) {
+      sendResponse({ ok: false, error: `unknown model: ${provider}/${model}` })
+      return
+    }
+    if (state.selection && state.selection.provider === provider && state.selection.model === model) {
+      sendResponse({ ok: true, changed: false, model: state.selection })
+      return
+    }
+    const previous = state.selection
+    state.selection = { provider, model }
+    saveSelection(state.selection)
+    request('augmentor/switchModel', { provider, model })
+      .then(async (res) => {
+        if (res?.changed) {
+          // The bridge restarted the runtime: handshake the new process.
+          const result = await request('initialize', {
+            cwd: 'chrome-extension://augmentor',
+            provider,
+            model,
+          })
+          broadcast(log('handshake', { event: 'model-switch', provider, model, serverInfo: result.serverInfo }))
+        }
+        sendResponse({ ok: true, changed: Boolean(res?.changed), model: state.selection })
+      })
+      .catch(async (e) => {
+        // Best effort: point the (possibly restarted) runtime back at the
+        // previous selection so the old conversation keeps working.
+        if (previous) {
+          try {
+            await request('initialize', {
+              cwd: 'chrome-extension://augmentor',
+              provider: previous.provider,
+              model: previous.model,
+            })
+            state.selection = previous
+            saveSelection(previous)
+            broadcast(log('handshake', { event: 'model-switch-rolled-back', provider: previous.provider, model: previous.model }))
+          } catch {
+            // The rollback handshake failed too: the runtime is unusable.
+            // Drop to the error state — the panel's Connect reboots the pair
+            // (with the user's pick still saved, so a plain retry retries
+            // the switch).
+            fail(`model switch failed: ${e.message}`)
+            return
+          }
+        } else {
+          fail(`model switch failed: ${e.message}`)
+          return
+        }
+        sendResponse({ ok: false, error: e.message })
+      })
+    return true // async
   }
   if (msg?.type === 'newchat') {
     SESSION_ID = `augmentor-${crypto.randomUUID().slice(0, 8)}`

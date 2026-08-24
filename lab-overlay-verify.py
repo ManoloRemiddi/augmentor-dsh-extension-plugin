@@ -60,12 +60,43 @@ def check(name, cond, extra=""):
         FAILS.append(name)
 
 
+def hsl_to_rgb(h, s, l):
+    """Mirror of the JS hslToRgb in veil.js / theme-tokens.js
+    (Math.round(v) for v >= 0 is int(v + 0.5))."""
+    h = ((h % 360) + 360) % 360
+    s, l = s / 100, l / 100
+    c = (1 - abs(2 * l - 1)) * s
+    hp = h / 60
+    x = c * (1 - abs((hp % 2) - 1))
+    if hp < 1:
+        r, g, b = c, x, 0
+    elif hp < 2:
+        r, g, b = x, c, 0
+    elif hp < 3:
+        r, g, b = 0, c, x
+    elif hp < 4:
+        r, g, b = 0, x, c
+    elif hp < 5:
+        r, g, b = x, 0, c
+    else:
+        r, g, b = c, 0, x
+    m = l - c / 2
+    return [int((r + m) * 255 + 0.5), int((g + m) * 255 + 0.5), int((b + m) * 255 + 0.5)]
+
+
+def accent_dot(hue):
+    """The veil's status-dot color for an accent hue: the VEIL_SPEC 'dot'
+    role (offset 0, s 70.6, l 45.3) — see veilPalette in veil.js /
+    theme-tokens.js."""
+    return hsl_to_rgb(hue, 70.6, 45.3)
+
+
 def overlay_state():
     """Probe the overlay from the page's MAIN world. The veil's JS lives in
     the content-script isolated world, so live state (mode, fps, frame
-    counter) is bridged through root.dataset.veil by veil.js itself.
-    children[0] is the visual layer: a <canvas> in webgl mode, 3 fog divs
-    in the CSS-fallback mode; children[1] is the pill."""
+    counter, accent hue) is bridged through root.dataset.veil by veil.js
+    itself. children[0] is the visual layer: a <canvas> in webgl mode, 3
+    fog divs in the CSS-fallback mode; children[1] is the pill."""
     return ev(WORK, """(() => {
       const root = document.getElementById('__dshAugOverlay')
       if (!root) return { present: false }
@@ -82,6 +113,7 @@ def overlay_state():
         veilMode: vs ? vs.m : null,
         fps: vs ? vs.f : null,
         total: vs ? vs.t : null,
+        accentHue: vs ? vs.a : null,
         veilChildren: [...veil.children].map(c => c.tagName.toLowerCase()),
         fogLayers: veil.children.length,
         fogBg: veil.children[0] ? getComputedStyle(veil.children[0]).backgroundImage.slice(0, 30) : '',
@@ -98,10 +130,20 @@ def overlay_state():
     })()""")
 
 
+def tinted(r, g, b):
+    """Hue-agnostic accent test: the veil tints pixels toward the user's
+    accent (any hue), so the signature is saturation, not a green channel:
+    the channel spread must be clearly non-neutral. (The pre-accent
+    signature was g-r > 40 and g-b > 30.)"""
+    mx = max(r, g, b)
+    md = sorted((r, g, b))[1]
+    mn = min(r, g, b)
+    return (mx - mn) > 35 and (mx - md) > 15
+
+
 def fog_pixel_present(png):
-    """Veil/fog: green tint dense at the borders. Works for the WebGL
-    frost rim as for the legacy fog gradient (34,197,94). The signature
-    is g >> r,b relative — works over light and dark pages."""
+    """Veil/fog: accent tint dense at the borders. Works for the WebGL
+    frost rim as for the legacy fog gradient, in ANY accent hue."""
     from PIL import Image
     im = Image.open(png).convert("RGB")
     w, h = im.size
@@ -111,7 +153,7 @@ def fog_pixel_present(png):
     for y in range(0, h, 4):
         for x in range(0, 4):
             r, g, b = px[x, y]
-            if g - r > 40 and g - b > 30:
+            if tinted(r, g, b):
                 hits += 1
     return hits, (w, h)
 
@@ -132,15 +174,15 @@ def pill_bottom_dark_pixels(png):
 
 
 def center_vs_edge_green(png):
-    """Fog shape: center should be far less green than the borders
-    (see-through middle, dense fog at the edges)."""
+    """Fog shape: center should be far less accent-tinted than the borders
+    (see-through middle, dense veil at the edges). Hue-agnostic."""
     from PIL import Image
     im = Image.open(png).convert("RGB")
     w, h = im.size
     px = im.load()
 
     def greenish(r, g, b):
-        return g - r > 40 and g - b > 30
+        return tinted(r, g, b)
 
     center = 0
     for x in range(int(w / 2 - 160), int(w / 2 + 160), 3):
@@ -174,7 +216,15 @@ if stage == "snap":
     check("pill visible", st.get("pillOpacity") == "1")
     check("pill at bottom-center of viewport", st.get("pillBottomCentered") is True)
     check("veil visible", st.get("fogOpacity") == "1")
-    check("dot is green", st.get("dotColor") == "rgb(34, 197, 94)", str(st.get("dotColor")))
+    hue = st.get("accentHue")
+    check("accent hue published", isinstance(hue, (int, float)), str(hue))
+    if isinstance(hue, (int, float)):
+        exp = accent_dot(hue)
+        check(
+            "dot matches the user's accent palette",
+            st.get("dotColor") == f"rgb({exp[0]}, {exp[1]}, {exp[2]})",
+            f"got {st.get('dotColor')} expected rgb({exp[0]}, {exp[1]}, {exp[2]}) for hue {hue}",
+        )
     check("dot pulse animation running", st.get("dotAnim") == "__dshAugPulse", str(st.get("dotAnim")))
     mode = st.get("veilMode")
     if mode == "webgl":
@@ -201,7 +251,7 @@ if stage == "snap":
     dark, size = pill_bottom_dark_pixels("/tmp/ov-snap.png")
     check("pill pixels at bottom-center", dark > 30, f"darkpx={dark} size={size}")
     hits, _ = fog_pixel_present("/tmp/ov-snap.png")
-    check("green fog pixels on left edge", hits > 20, f"greenpx={hits}")
+    check("accent-tinted veil pixels on left edge", hits > 20, f"tintedpx={hits}")
     cgreen, egreen, _ = center_vs_edge_green("/tmp/ov-snap.png")
     check("center see-through vs dense borders", egreen > 50 and cgreen < max(10, egreen // 3),
           f"center={cgreen} edge={egreen}")
@@ -225,7 +275,16 @@ elif stage == "click":
     })()""")
     print("   ripple state:", json.dumps(ripple))
     check("ripple div present", ripple["ripples"] >= 1, json.dumps(ripple))
-    check("h1 boxShadow animated (green)", "rgba(34, 197, 94" in ripple["h1shadow"], ripple["h1shadow"])
+    hue = overlay_state().get("accentHue")  # fresh: st predates the click
+    if isinstance(hue, (int, float)):
+        c = accent_dot(hue)
+        check(
+            "h1 boxShadow animated in the accent color",
+            f"rgba({c[0]}, {c[1]}, {c[2]}" in ripple["h1shadow"],
+            ripple["h1shadow"],
+        )
+    else:
+        check("h1 boxShadow animated in the accent color", False, "accent hue not published")
     time.sleep(0.5)  # let the after-action label update land
     st = overlay_state()
     check("label = 'Augmentor — Clicked on Example Domain'", st.get("label") == "Augmentor — Clicked on Example Domain", str(st.get("label")))
@@ -243,7 +302,7 @@ elif stage == "nav":
     check("label = 'Augmentor — Opened www.wikipedia.org'", st.get("label") == "Augmentor — Opened www.wikipedia.org", str(st.get("label")))
     shot("/tmp/ov-nav.png")
     hits, _ = fog_pixel_present("/tmp/ov-nav.png")
-    check("green fog pixels on wikipedia", hits > 20, f"greenpx={hits}")
+    check("accent-tinted veil pixels on wikipedia", hits > 20, f"tintedpx={hits}")
 
 elif stage == "fade":
     # Re-show, confirm visible, then confirm the 4s idle fade removes it.
