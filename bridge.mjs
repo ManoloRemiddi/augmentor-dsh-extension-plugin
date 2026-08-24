@@ -12,7 +12,11 @@
  *   3. serves a loopback HTTP endpoint that the in-runtime `dsh-browser` CLI
  *      posts browser actions to; each action becomes a server->client-style
  *      request {id, method:'browser/execute', params} on the Chrome port and
- *      resolves when the extension answers {id, result|error}
+ *      resolves when the extension answers {id, result|error}. Relay
+ *      coordinates are registered per instance at
+ *      trace/bridge-endpoints/<pid>.json; the CLI walks its own ancestor
+ *      process tree to find the bridge that spawned it, so concurrent bridge
+ *      instances never clobber each other's endpoint.
  *   4. serves the bridge-local model methods the extension's picker needs:
  *      `augmentor/models` (the DSH app's model catalog, read from
  *      $DSH_HOME/settings.yaml so the sidecar offers exactly what the DSH app
@@ -28,7 +32,7 @@
 import { spawn } from 'node:child_process'
 import { createServer } from 'node:http'
 import { randomBytes } from 'node:crypto'
-import { mkdirSync, readFileSync, writeFileSync, appendFileSync, existsSync, readdirSync } from 'node:fs'
+import { mkdirSync, readFileSync, writeFileSync, appendFileSync, existsSync, readdirSync, unlinkSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import os from 'node:os'
 import path from 'node:path'
@@ -41,10 +45,13 @@ const CORDIS_YML = path.join(CLONE, 'examples', 'jsonrpc-agent', 'augmentor.cord
 const WORKDIR = path.join(BASE, 'agent-workdir')
 const SESSION_ROOT = path.join(BASE, 'sessions')
 const TRACE_DIR = path.join(BASE, 'trace')
+const ENDPOINT_DIR = path.join(TRACE_DIR, 'bridge-endpoints')
+const ENDPOINT_FILE = path.join(ENDPOINT_DIR, `${process.pid}.json`)
 
 mkdirSync(WORKDIR, { recursive: true })
 mkdirSync(SESSION_ROOT, { recursive: true })
 mkdirSync(TRACE_DIR, { recursive: true })
+mkdirSync(ENDPOINT_DIR, { recursive: true })
 
 const T0 = Date.now()
 const TRACE = path.join(TRACE_DIR, `bridge-${new Date(T0).toISOString().replace(/[:.]/g, '-')}.jsonl`)
@@ -352,6 +359,11 @@ function cleanup(code) {
     /* ignore */
   }
   if (child && !child.killed) child.kill('SIGTERM')
+  try {
+    unlinkSync(ENDPOINT_FILE)
+  } catch {
+    /* already gone or never written */
+  }
   process.exit(code)
 }
 
@@ -477,9 +489,11 @@ httpServer.listen(0, '127.0.0.1', () => {
   const port = httpServer.address().port
   // The harness scrubs ALL DSH_* (and credential-shaped) env vars before the
   // bash tool's spawn (dsh-subprocess scrubbedParentEnv), so env cannot carry
-  // the relay coordinates. The shim resolves this file relative to itself.
-  writeFileSync(path.join(BASE, '.browser-endpoint'), JSON.stringify({ url: `http://127.0.0.1:${port}`, secret: SECRET }))
-  trace('bridge', { event: 'browser-relay-listening', port })
+  // the relay coordinates. Registration is keyed by this instance's pid: a
+  // second bridge instance (reconnect, manual run) registers its own file and
+  // cannot clobber this one.
+  writeFileSync(ENDPOINT_FILE, JSON.stringify({ pid: process.pid, url: `http://127.0.0.1:${port}`, secret: SECRET, startedAt: new Date().toISOString() }))
+  trace('bridge', { event: 'browser-relay-listening', port, endpointFile: `trace/bridge-endpoints/${process.pid}.json` })
   spawnRuntime()
 })
 

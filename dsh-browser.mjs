@@ -6,12 +6,16 @@
  *
  * usage: dsh-browser '{"action":"tabs_list"}'
  *
- * Bridge coordinates come from <augmentor>/.browser-endpoint (written by
- * bridge.mjs; the harness scrubs DSH_* env vars from the bash tool's spawn,
- * so env cannot carry them). Env vars remain as a fallback.
+ * The harness scrubs DSH_* (and credential-shaped) env vars from the bash
+ * tool's spawn, so env cannot carry the bridge coordinates. Each bridge
+ * instance registers its relay at trace/bridge-endpoints/<pid>.json; this
+ * CLI walks its own ancestor process tree to find the bridge instance that
+ * spawned the runtime it runs in, so concurrent bridge instances can never
+ * point it at the wrong relay. Env vars (DSH_BROWSER_BRIDGE /
+ * DSH_BROWSER_SECRET) remain as an override.
  */
 
-import { readFileSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -20,19 +24,52 @@ function fail(message) {
   process.exit(1)
 }
 
-let url = process.env['DSH_BROWSER_BRIDGE']
-let secret = process.env['DSH_BROWSER_SECRET'] ?? ''
-try {
-  const endpoint = JSON.parse(
-    readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), '.browser-endpoint'), 'utf8'),
-  )
-  url = endpoint.url
-  secret = endpoint.secret
-} catch {
-  /* fall back to env / fail below */
+const ENDPOINT_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), 'trace', 'bridge-endpoints')
+
+/**
+ * Walk the ancestor process tree (Linux /proc) to find the bridge instance
+ * that owns this CLI. For each ancestor pid, a registration file
+ * <endpoint-dir>/<pid>.json is authoritative only if the live process with
+ * that pid is actually bridge.mjs (guards against pid reuse).
+ * @returns {{url: string, secret: string} | null}
+ */
+function findAncestorBridge() {
+  let pid = process.ppid
+  for (let depth = 0; depth < 12 && pid > 1; depth++) {
+    const file = path.join(ENDPOINT_DIR, `${pid}.json`)
+    try {
+      if (existsSync(file)) {
+        const cmdline = readFileSync(`/proc/${pid}/cmdline`, 'utf8')
+        if (cmdline.includes('bridge.mjs')) {
+          const reg = JSON.parse(readFileSync(file, 'utf8'))
+          if (reg?.url && typeof reg.secret === 'string') return { url: reg.url, secret: reg.secret }
+        }
+      }
+    } catch {
+      /* unreadable entry — keep walking */
+    }
+    try {
+      const stat = readFileSync(`/proc/${pid}/stat`, 'utf8')
+      // /proc/<pid>/stat: "pid (comm) state ppid ..." — comm may contain
+      // spaces/parens, so split after the LAST ')'.
+      const fields = stat.slice(stat.lastIndexOf(')') + 2).split(' ')
+      pid = Number(fields[1])
+    } catch {
+      break // chain exhausted or unreadable
+    }
+  }
+  return null
 }
 
-if (!url) fail('no bridge endpoint found (.browser-endpoint missing and DSH_BROWSER_BRIDGE unset — bridge not running?)')
+function resolveEndpoint() {
+  if (process.env['DSH_BROWSER_BRIDGE']) {
+    return { url: process.env['DSH_BROWSER_BRIDGE'], secret: process.env['DSH_BROWSER_SECRET'] ?? '' }
+  }
+  return findAncestorBridge()
+}
+
+const endpoint = resolveEndpoint()
+if (!endpoint) fail(`no bridge relay found (no DSH_BROWSER_BRIDGE env and no live bridge ancestor registered in ${ENDPOINT_DIR} — is the Augmentor bridge running?)`)
 
 const body = process.argv[2]
 if (!body) fail('usage: dsh-browser \'<single-line JSON>\'')
@@ -45,15 +82,16 @@ try {
 }
 
 try {
-  const res = await fetch(`${url}/browser`, {
+  const res = await fetch(`${endpoint.url}/browser`, {
     method: 'POST',
-    headers: { 'content-type': 'application/json', 'x-augmentor-secret': secret },
+    headers: { 'content-type': 'application/json', 'x-augmentor-secret': endpoint.secret },
     body,
     signal: AbortSignal.timeout(115000),
   })
   const text = await res.text()
+  if (res.status === 403) fail(`bridge relay at ${endpoint.url} rejected the secret (stale endpoint registration? endpoint: ${ENDPOINT_DIR})`)
   console.log(text)
   process.exit(res.ok ? 0 : 1)
 } catch (e) {
-  fail(String(e?.message ?? e))
+  fail(`bridge relay unreachable at ${endpoint.url}: ${String(e?.message ?? e)}`)
 }
