@@ -986,3 +986,27 @@ in a vm, real pipe, live server) and m3-e2e (real Chromium + real SW + NMH
 pipe + live DSH), which also got its badge assertions rewritten for the
 icon-only Save star from §13 (it still read the old `☆ Save` text and
 would have failed on the 0.1.12 build).
+
+## 15. Addendum — brand link, auto-contrast Send, user bubble (2026-08-26)
+
+**Brand.** The header title is now a link: **Augmentor** (bold 12.5px) +
+*powered by DSH* (italic 9.5px, `--text3`) pointing at
+`https://augmentoragent.com/` (`target="_blank"`). The `#title` span stays
+dynamic — a session's name still lands there (chat-render's title event);
+the italic suffix is the constant brand tail. Hover tints the word in the
+accent. Status font 11 → 10.5px so "connected" still fits at the 400px
+default width with the wider brand (geometry-probed at 340/400/480).
+
+**Auto-contrast Send.** `theme-tokens.js` gains `contrastOn(rgb)`: WCAG
+relative luminance; white stays while it holds ≥ 3:1 against the accent
+(the shipped look — white on brand blue is 3.37:1 and is kept), then the
+label flips to `#000` once the accent is brightened past pastel (below
+3:1 black is always strictly better, so no second comparison). `panelTheme`
+emits `--on-brand` alongside `--brand`; `#send` and the theme-settings
+segment control use `var(--on-brand, #fff)`. Verified: default blue → #fff;
+blue/green/yellow/pink at +15 → #000; black at −15 → #fff.
+
+**User bubble.** `user/message` already built `.msg.user` (You + userbody);
+it now sits in a faint accent wash — `--brand-soft` (brand at 16% alpha,
+emitted by `panelTheme`, so it follows hue + brightness + theme) with
+10px radius. Noticeable without shouting, per the ask.

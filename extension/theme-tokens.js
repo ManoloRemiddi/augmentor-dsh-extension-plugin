@@ -45,6 +45,22 @@
   const rgbaStr = (c, a) => `rgba(${c[0]}, ${c[1]}, ${c[2]}, ${a})`
 
   /**
+   * Label color for text sitting ON TOP of the given sRGB accent surface:
+   * #fff while white holds a >= 3:1 WCAG contrast ratio against it (the
+   * shipped look — white on the brand blue), then #000 once the accent is
+   * brightened past pastel and white would strand. (Below 3:1, black is
+   * always strictly better, so no second comparison is needed.)
+   */
+  function contrastOn(rgb) {
+    const lin = (v) => {
+      const c = v / 255
+      return c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4
+    }
+    const L = 0.2126 * lin(rgb[0]) + 0.7152 * lin(rgb[1]) + 0.0722 * lin(rgb[2])
+    return 1.05 / (L + 0.05) >= 3.0 ? '#fff' : '#000'
+  }
+
+  /**
    * Final lightness for an accent color given a base lightness and the
    * accent brightness offset (−15..15).
    *   bright >= 0 : adds lightness points (clamped 0..100) — brighten.
@@ -129,13 +145,17 @@
     // fades multiplicatively to full black via accentLight).
     const a = theme === 'light' ? [-1.3, 77, 57.8] : [0.9, 99, 66.7]
     const ab = Number.isFinite(accentBright) ? accentBright : 0
-    out['--brand'] = rgbStr(
-      hslToRgb(
-        (Number.isFinite(accentHue) ? accentHue : DEFAULTS.accentHue) + a[0],
-        a[1],
-        accentLight(a[2], ab),
-      ),
+    const brandRgb = hslToRgb(
+      (Number.isFinite(accentHue) ? accentHue : DEFAULTS.accentHue) + a[0],
+      a[1],
+      accentLight(a[2], ab),
     )
+    out['--brand'] = rgbStr(brandRgb)
+    // Label color that stays readable on a brand-filled surface (Send button,
+    // active theme-segment) as the accent is brightened past pastel.
+    out['--on-brand'] = contrastOn(brandRgb)
+    // Faint accent wash — the user-message bubble (see sidepanel.html).
+    out['--brand-soft'] = rgbaStr(brandRgb, 0.16)
     return out
   }
 
@@ -205,6 +225,7 @@
     hslToRgb,
     rgbStr,
     rgbaStr,
+    contrastOn,
     accentLight,
     NEUTRALS,
     panelTheme,

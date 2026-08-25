@@ -66,10 +66,18 @@
   #dot[data-phase="error"] { background: var(--err); animation: pulse 1s infinite; }
   @keyframes pulse { 50% { opacity: 0.4; } }
   #logo { width: 18px; height: 18px; flex: none; display: block; }
-  #title { font-size: 13px; font-weight: 600; overflow: hidden;
-    text-overflow: ellipsis; white-space: nowrap; max-width: 34%; }
-  #status { font-size: 11px; color: var(--text3); flex: 1; text-align: right;
-    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  /* Brand: "Augmentor" bold + "powered by DSH" small-italic, linked to the
+     site. The title span stays dynamic (a session's name lands here when it
+     has one); the suffix is the constant brand tail. */
+  #brand { flex: none; display: flex; align-items: baseline; gap: 5px; max-width: 38%;
+    min-width: 0; overflow: hidden; text-decoration: none; color: var(--text); }
+  #title { font-size: 12.5px; font-weight: 700; overflow: hidden;
+    text-overflow: ellipsis; white-space: nowrap; }
+  #brand .powered { font-size: 9.5px; font-weight: 400; font-style: italic;
+    color: var(--text3); white-space: nowrap; }
+  #brand:hover #title { color: var(--brand); }
+  #status { font-size: 10.5px; color: var(--text3); flex: 1; min-width: 0;
+    text-align: right; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   /* Header action buttons are icon-only (26px squares, stroke icons at 16px):
      the old text labels crowded the bar at side-panel widths. Tooltips carry
      the words; aria-labels keep them out of the accessibility tree silent. */
@@ -117,7 +125,8 @@
     gap: 5px; border: 1px solid var(--border2); background: transparent; color: var(--text2);
     font-size: 11px; font-weight: 600; border-radius: 6px; padding: 4px 0; cursor: pointer; }
   .hp-seg button:hover { background: var(--hover); color: var(--text); }
-  .hp-seg button.active { background: var(--brand); border-color: var(--brand); color: #fff; }
+  .hp-seg button.active { background: var(--brand); border-color: var(--brand);
+    color: var(--on-brand, #fff); }
   input.hueslider { -webkit-appearance: none; appearance: none; display: block; width: 100%;
     height: 10px; border-radius: 5px; outline: none; margin: 0; cursor: pointer;
     border: 1px solid var(--border2); }
@@ -161,7 +170,10 @@
   .msg { display: flex; gap: 8px; align-items: baseline; }
   .msg .who { flex: none; font-size: 10.5px; font-weight: 700; color: var(--text3);
     text-transform: uppercase; letter-spacing: 0.06em; padding-top: 2px; }
-  .msg.user { color: var(--text); }
+  /* Your prompts sit in a faint accent wash — noticeable without shouting,
+     and it follows the accent hue/brightness (the --brand-soft token). */
+  .msg.user { color: var(--text); background: var(--brand-soft, rgba(86, 134, 254, 0.16));
+    border-radius: 10px; padding: 7px 10px 4px; }
   /* Assistant blocks stack (Think over text) — a flex row here would let the
      wide Think block squeeze the reply into a one-character sliver. */
   .msg.assistant { display: block; }
@@ -310,7 +322,9 @@
     background: var(--bg); color: var(--text); font: inherit; padding: 8px 10px;
     max-height: 120px; outline: none; }
   #input:focus { border-color: var(--brand); }
-  #send { border: none; border-radius: 8px; background: var(--brand); color: #fff;
+  #send { border: none; border-radius: 8px; background: var(--brand);
+    color: var(--on-brand, #fff); /* --on-brand flips #fff→#000 when the
+    accent is brightened past pastel (theme-tokens contrastOn) */
     font-size: 12px; font-weight: 600; padding: 8px 14px; cursor: pointer; height: 36px; }
   #send:disabled { opacity: 0.4; cursor: default; }
   #send:not(:disabled):hover { filter: brightness(1.1); }
@@ -324,7 +338,10 @@
   <header>
     <span id="dot"></span>
     <img id="logo" src="favicon.svg" alt="" width="18" height="18">
-    <span id="title">Augmentor</span>
+    <a id="brand" href="https://augmentoragent.com/" target="_blank" rel="noopener"
+      title="augmentoragent.com">
+      <span id="title">Augmentor</span><span class="powered">powered by DSH</span>
+    </a>
     <span id="status">disconnected</span>
     <button id="hue" class="hicon" title="Theme + colors"
       aria-label="Color settings" aria-haspopup="dialog">
