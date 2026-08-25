@@ -578,8 +578,9 @@ function updateSaveBadge(res) {
   if (typeof res.endpoint === 'string') m3Endpoint = res.endpoint
   if (Array.isArray(res.saved)) m3Saved = new Set(res.saved)
   const saved = m3SessionId !== null && m3Saved.has(m3SessionId)
+  // Icon-only button: state rides the .saved class (the star FILLS in the
+  // accent) — never textContent, which would destroy the SVG child.
   saveBtn.classList.toggle('saved', saved)
-  saveBtn.textContent = saved ? '✓ Saved' : '☆ Save'
   saveBtn.title = saved
     ? 'This chat is saved in DSH under Augmentor Chat — tap to unsave'
     : 'Save this chat to the Augmentor Chat workspace in DSH (tap again to unsave)'

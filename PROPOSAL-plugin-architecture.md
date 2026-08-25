@@ -932,3 +932,25 @@ user could not see.
   automation for DSH sessions. The product boundary is now explicit — the
   PANEL is Augmentor (real browser, persona); in-app sessions are ordinary
   DSH (Playwright = a separate, invisible browser).
+
+## 13. Addendum — header iconification + extension identity (2026-08-26)
+
+**Change.** The side-panel header carried six text labels (＋ New chat,
+☆ Save, DSH ↗, Connect, ≣ Sessions, plus the hue disc) — crowded at
+side-panel widths. All actions are now 26px icon squares (16px stroke
+icons, `currentColor`, tooltips + aria-labels keep the words): new chat
+(bubble+plus), save (star — FILLS in the accent when saved, replacing the
+old "✓ Saved" text), open-in-DSH (external link), connect (link, brand
+fill, auto-hidden by `updateChrome` when ready/connecting as before),
+sessions (list). The word "Augmentor" now sits next to the site's frost
+mark (`website/favicon.svg`, copied into the extension as `favicon.svg`),
+which also becomes the tab favicon.
+
+**Extension identity.** `manifest.json` gains `icons` + `action.default_icon`
+(16/32/48/128 PNGs rendered from the same favicon SVG) — the extension
+finally has a face in chrome://extensions and the toolbar (it had none).
+Version 0.1.11 → 0.1.12.
+
+**Verified.** Headless-Chromium geometry probe of the real `sidepanel.html`:
+no header overflow at 300/340/400px, both connected and disconnected
+states; status text fits at the 400px default width.

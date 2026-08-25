@@ -3,6 +3,7 @@
 <head>
 <meta charset="utf-8">
 <title>Augmentor powered by DSH</title>
+<link rel="icon" type="image/svg+xml" href="favicon.svg">
 <script src="vendor/marked.min.js"></script>
 <!-- Theme + color restore must be a file, not inline: MV3's default
      extension-page CSP (script-src 'self') blocks inline scripts in
@@ -57,25 +58,33 @@
     font: 13px/1.55 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
   #app { display: flex; flex-direction: column; height: 100%; }
 
-  header { flex: none; display: flex; align-items: center; gap: 8px;
-    padding: 9px 14px; border-bottom: 1px solid var(--border); }
+  header { flex: none; display: flex; align-items: center; gap: 4px;
+    padding: 9px 10px; border-bottom: 1px solid var(--border); }
   #dot { width: 8px; height: 8px; border-radius: 50%; background: var(--text3); flex: none; }
   #dot[data-phase="ready"] { background: var(--brand); }
   #dot[data-phase="connecting"] { background: var(--warn); animation: pulse 1s infinite; }
   #dot[data-phase="error"] { background: var(--err); }
   @keyframes pulse { 50% { opacity: 0.4; } }
+  #logo { width: 18px; height: 18px; flex: none; display: block; }
   #title { font-size: 13px; font-weight: 600; overflow: hidden;
-    text-overflow: ellipsis; white-space: nowrap; max-width: 55%; }
+    text-overflow: ellipsis; white-space: nowrap; max-width: 34%; }
   #status { font-size: 11px; color: var(--text3); flex: 1; text-align: right;
     overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .hbtn { flex: none; border: 1px solid var(--border2); border-radius: 6px; background: transparent;
-    color: var(--text2); font-size: 11.5px; font-weight: 600; padding: 4px 10px; cursor: pointer; }
-  .hbtn:hover { background: var(--layer2); color: var(--text); }
-  #connect { background: var(--brand); border: none; color: #fff; }
-  #connect:hover { background: var(--brand); filter: brightness(1.1); }
-  /* M3: Save badge — a saved chat reads as "done", in the accent, not a hover. */
-  #save.saved { color: var(--accent, var(--brand)); border-color: var(--accent, var(--brand)); }
-  #save.saved:hover { background: var(--layer2); }
+  /* Header action buttons are icon-only (26px squares, stroke icons at 16px):
+     the old text labels crowded the bar at side-panel widths. Tooltips carry
+     the words; aria-labels keep them out of the accessibility tree silent. */
+  .hbtn { flex: none; display: inline-flex; align-items: center; justify-content: center;
+    width: 26px; height: 26px; border: none; border-radius: 6px; background: transparent;
+    color: var(--text2); cursor: pointer; padding: 0; }
+  .hbtn:hover { background: var(--hover); color: var(--text); }
+  .hbtn svg { display: block; }
+  #connect { background: var(--brand); color: #fff; }
+  #connect:hover { background: var(--brand); filter: brightness(1.1); color: #fff; }
+  /* M3: Save badge — a saved chat reads as "done": the star FILLS in the
+     accent (a filled shape, not a hover tint). */
+  #save.saved { color: var(--accent, var(--brand)); }
+  #save.saved svg { fill: currentColor; }
+  #save.saved:hover { background: var(--layer2); color: var(--accent, var(--brand)); }
   .hicon { flex: none; display: inline-flex; align-items: center; justify-content: center;
     width: 26px; height: 26px; border: none; border-radius: 6px; background: transparent;
     color: var(--text2); cursor: pointer; }
@@ -316,17 +325,48 @@
 <div id="app">
   <header>
     <span id="dot"></span>
+    <img id="logo" src="favicon.svg" alt="" width="18" height="18">
     <span id="title">Augmentor</span>
     <span id="status">disconnected</span>
     <button id="hue" class="hicon" title="Theme + colors"
       aria-label="Color settings" aria-haspopup="dialog">
       <span class="hue-chip"></span>
     </button>
-    <button id="newchat" class="hbtn" title="Start a new session">＋ New chat</button>
-    <button id="save" class="hbtn" title="Save this chat to the Augmentor Chat workspace in DSH (tap again to unsave)">☆ Save</button>
-    <button id="openindsh" class="hbtn" title="Open the running DSH app in a new tab">DSH ↗</button>
-    <button id="connect" class="hbtn">Connect</button>
-    <button id="sessions" class="hbtn" title="Browse DSH app sessions (M1)">≣ Sessions</button>
+    <button id="newchat" class="hbtn" title="Start a new session" aria-label="Start a new session">
+      <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor"
+        stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M3.5 3.5h9a1 1 0 0 1 1 1v5a1 1 0 0 1-1 1H7L4.5 13v-2.5h-1a1 1 0 0 1-1-1v-5a1 1 0 0 1 1-1z" />
+        <path d="M8 4.75v3.5M6.25 6.5h3.5" />
+      </svg>
+    </button>
+    <button id="save" class="hbtn" title="Save this chat to the Augmentor Chat workspace in DSH (tap again to unsave)" aria-label="Save this chat">
+      <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor"
+        stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M8 1.33l2.06 4.18 4.61.67-3.34 3.25.79 4.58-4.12-2.16-4.12 2.16.79-4.58-3.34-3.25 4.61-.67z" />
+      </svg>
+    </button>
+    <button id="openindsh" class="hbtn" title="Open the running DSH app in a new tab" aria-label="Open in DSH">
+      <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor"
+        stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M6.9 3.5H4.75a1.25 1.25 0 0 0-1.25 1.25v6.5a1.25 1.25 0 0 0 1.25 1.25h6.5a1.25 1.25 0 0 0 1.25-1.25V9.1" />
+        <path d="M9.9 3.5h2.6v2.6" />
+        <path d="M12.2 3.8 7.9 8.1" />
+      </svg>
+    </button>
+    <button id="connect" class="hbtn" title="Connect to DSH" aria-label="Connect to DSH">
+      <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor"
+        stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M6.67 8.67a3.33 3.33 0 0 0 5.03.36l2-2a3.33 3.33 0 0 0-4.71-4.71L7.85 3.46" />
+        <path d="M9.33 7.33a3.33 3.33 0 0 0-5.03-.36l-2 2a3.33 3.33 0 0 0 4.71 4.71l1.14-1.14" />
+      </svg>
+    </button>
+    <button id="sessions" class="hbtn" title="Browse DSH app sessions (M1)" aria-label="Browse sessions">
+      <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor"
+        stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M6.2 4.5h7.3M6.2 8h7.3M6.2 11.5h7.3" />
+        <path d="M2.9 4.5h.01M2.9 8h.01M2.9 11.5h.01" />
+      </svg>
+    </button>
   </header>
   <div id="logwrap">
     <div id="log"></div>
