@@ -470,9 +470,12 @@ low-frequency sweep (boot + hourly):
    validation next) — the 403 is attributed, not just observed. Persisted in
    `trace/fence-probe-headless.json`. The client-side half — a real SW fetch of
    `/api/augmentor` + `/` + a POST to `/api/session.list` — ships as the panel's fence
-   strip (Probe button) and records `trace/fence-probe.json` on click; expected to match
-   the headless run row for row. The protocol pipe (item B1) is the primary transport
-   regardless — no fallback branch.
+   strip (Probe button) and records `trace/fence-probe.json` on click. **Done in real
+   Chrome** (151.0.7922.169, headless=new + CDP via `test/chrome-e2e.mjs`, fresh
+   profile, user's browser untouched): the persisted artifact matches the headless run
+   row for row — plugin exact route **200** (body carries the `dsh-augmentor`
+   handshake), `/` **200**, fenced `/api` request **403 `forbidden`**. The protocol
+   pipe (item B1) is the primary transport regardless — no fallback branch.
 2. **SW keep-alive**: measure Chrome's SW idle-kill with an open WS + ping cadence; pick
    the ping interval (25s) and verify no kill mid-turn.
 3. **Concurrent attach**: GUI + extension on the same session — confirm queue/FIFO
@@ -703,7 +706,18 @@ inventory).
   `native_host_permissions` manifest key in Chrome). The extension **is loaded** in the
   user's Chromium (`extensions.settings` entry for the id, path `augmentor/extension/`).
   Remaining step: side panel → Connect → Sessions → open a conversation → Probe.
-  Pre-flight for that click is proven headlessly, two levels deep. `test/sw-e2e.mjs`
+  **M1 browser-half acceptance — done in real Chrome (2026-08-25).**
+  `test/chrome-e2e.mjs` drives the real flow in the user's own browser binary
+  (Chromium 151.0.7922.169, headless=new + CDP, fresh user-data-dir, user's browser
+  untouched): `#connect` → **connected** (real SW `connectNative` → host-manifest
+  pipe → live server), `#sessions` → **32 rows**, **Probe** → `trace/fence-probe.json`
+  with the **403 `forbidden`** fence row (real Chrome fetch metadata), target session
+  row → **262 KB of the DSH conversation rendered** (4 user + 58 assistant bubbles,
+  session title correct, newest user message text in the DOM). The pipe trace carries
+  the real-SW fingerprint: first frame **`c1` / `augmentor/models`**, max frame
+  846 KiB < 1 MiB. Every M1 component is thus verified in the production stack; the
+  user's own click (extension already loaded in their profile) reproduces the same
+  panel. Pre-flight for it had been proven headlessly, two levels deep. `test/sw-e2e.mjs`
   runs the **real `sw.js`** (vm) against the **real pipe** (spawned via the host
   manifest, origin argv) against the live server — handshake reaches `ready`,
   `session.list` returns 32 sessions, `session.history` returns a shaped frame (414
