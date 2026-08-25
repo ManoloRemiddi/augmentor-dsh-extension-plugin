@@ -834,3 +834,44 @@ inventory).
 - The plugin `inject`s only `tools` (present in every composition); `webServer` and
   `settings` are consumed via optional `ctx.get()` so the plugin never PENDs in a
   non-web profile.
+
+## 11. Addendum — the persona: `augmentor` agent preset (2026-08-25)
+
+**Symptom.** After the M1–M3 plugin migration the panel agent no longer
+behaved as Augmentor: on "no browser client connected" it dropped the
+contract and improvised (headless Playwright, hunting debug ports, "let me
+inspect the Augmentor browser bridge"). The old bridge never showed this.
+
+**Root cause.** The old bridge injected the persona as
+`DSH_SYSTEM_PROMPT` (bridge.mjs `initialize` cwd + `persona.md` → the
+agent-spine `persona:` config). The plugin migration dropped it: panel
+sessions were created with no `agentPreset` meta, so they ran the
+deployment default — the `standard` preset, a generic coding persona.
+The browser_* tools themselves were always visible (root-realm plugin
+registration reaches every session); only the identity was missing.
+
+**Fix (commit ec3ceb9) — the old solution, ported to the preset
+mechanism.**
+- `presets/augmentor/` (source; installed at
+  `~/.dsh/.agent-presets/augmentor/`, the user preset root the roster
+  always scans) — an AGENT-PLANE composition:
+  - **persona**: the old `persona.md` adapted to the five browser_* tools
+    (sticky work tab, frost veil, pulse-on-click), plus the failure rule
+    that killed the observed drift: *no browser client connected = the
+    extension is not attached → tell the user, never launch/improvise a
+    browser*;
+  - **surface**: bash, fs, fs-search, todo, subagent (spawn/fork), and the
+    standard preset's plan-mode/compaction blocks verbatim. No background
+    jobs, no skills, no goals, no ask-user (the panel has no answer path
+    for questions — an unanswered ask would stall the turn).
+- **plugin**: `config.agentPreset` (default `augmentor`), exposed in the
+  GET handshake body (folded into the pipe `initialize`).
+- **sw.js**: stores the handshake value and passes
+  `session.create {agentPreset}` when present — degrades to the app
+  default when the roster lacks the preset instead of failing creation.
+- **tests**: boot test asserts the handshake carries the preset and that
+  `session.create` under it succeeds with the preset in the artifact
+  header; m3-e2e asserts the SW-created session header carries it.
+
+**Note.** Existing panel sessions keep their creation-time preset — the
+persona applies from the next new chat (the panel "New chat" button).
