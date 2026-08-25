@@ -36,7 +36,10 @@
  *                         session.selectModel)
  *   trace/fence-probe     writes trace/fence-probe.json (ext-Origin fence evidence)
  *   shutdown              {ok:true}, then clean exit
- * Everything else passes through verbatim to POST /api/<method>.
+ * Everything else passes through verbatim to POST /api/<method>, with one
+ * exception: session.history responses are shaped (shapeHistory) —
+ * assistant/chunk stripped and oldest events dropped until the frame fits
+ * under the 1 MiB native-messaging wire limit. See the function comment.
  */
 import { readFileSync, writeFileSync } from 'node:fs'
 import { readFile, mkdir } from 'node:fs/promises'
@@ -327,6 +330,53 @@ const localMethods = {
 
 // --------------------------------------------------------- dispatch (ext)
 let shuttingDown = false
+// --------------------------------------------------- history byte shaping
+// Chrome's native messaging limit is **1 MiB per host->extension message**
+// (developer.chrome.com, native-messaging: "The maximum size of a single
+// message from the native messaging host is 1 MB"). A full DSH session
+// history is chunk-heavy — one event per streamed token: a 99-message
+// session measured 10.8 MB on the wire, a 500-message tail 92 MB. The
+// panel's history renderer (chat-render.js) renders whole turns from
+// `assistant/message` (its text is authoritative — "covers providers
+// without chunks"), `user/message`, `tool/call`, `tool/result`, turn/step
+// frames; `assistant/chunk` only matters for *live* streaming, where it
+// arrives as tiny individual downlink frames. So for the bulk history
+// frame we: (1) strip assistant/chunk, (2) keep the NEWEST events and
+// drop from the oldest side until under the byte budget — the recent
+// context always renders. Live streaming is untouched.
+const HISTORY_BUDGET = 850 * 1024 // well under the 1 MiB wire limit
+function shapeHistory(value) {
+  if (!value?.events?.length) return value
+  const events = value.events.filter((h) => h?.event?.type !== 'assistant/chunk')
+  if (!events.length) return { ...value, events: [] }
+  const envelopeCost = JSON.stringify({ ...value, events: [] }).length
+  let budget = HISTORY_BUDGET - envelopeCost
+  let start = events.length // nothing fits yet
+  for (let i = events.length - 1; i >= 0; i--) {
+    const cost = JSON.stringify(events[i]).length + 2 // +2 for ", "
+    if (cost > budget) break
+    budget -= cost
+    start = i
+  }
+  if (start === events.length) {
+    // Pathological: not even the newest event fits. Keep the newest one and
+    // cap its long strings so the frame still lands under the wire limit.
+    const capStrings = (o) => {
+      if (typeof o === 'string' && o.length > 50 * 1024)
+        return o.slice(0, 50 * 1024) + ` …[truncated ${o.length - 50 * 1024} chars]`
+      if (Array.isArray(o)) return o.map(capStrings)
+      if (o && typeof o === 'object') {
+        for (const k of Object.keys(o)) o[k] = capStrings(o[k])
+      }
+      return o
+    }
+    return { ...value, events: [capStrings({ ...events[events.length - 1] })], truncatedEarlier: events.length - 1 }
+  }
+  const out = { ...value, events: events.slice(start) }
+  if (start > 0) out.truncatedEarlier = start
+  return out
+}
+
 let stdinBuf = Buffer.alloc(0)
 async function handleExtMessage(msg) {
   trace({ kind: 'ext->pipe', msg })
@@ -341,7 +391,11 @@ async function handleExtMessage(msg) {
   }
   const id = msg.id
   try {
-    const value = localMethods[msg.method] ? await localMethods[msg.method](msg.params) : await dsh(msg.method, msg.params ?? {})
+    let value = localMethods[msg.method] ? await localMethods[msg.method](msg.params) : await dsh(msg.method, msg.params ?? {})
+    if (msg.method === 'session.history') {
+      value = shapeHistory(value)
+      if (value.truncatedEarlier) log('history shaped', { truncatedEarlier: value.truncatedEarlier })
+    }
     sendToExt({ id, result: value })
   } catch (e) {
     sendToExt({ id, error: { message: e.message ?? String(e) } })

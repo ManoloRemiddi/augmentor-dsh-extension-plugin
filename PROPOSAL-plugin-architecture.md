@@ -184,6 +184,21 @@ Transport mechanics the pipe must respect:
   (`settings.*`, `credentials.*`, `agentPreset.*` — `packages/client/connection/src/index.ts:89-119`).
   The pipe is effectively a full-power client (inherited posture, R4); the plugin's action
   WS is the only channel that adds its own token.
+- **Native-messaging frames are capped at 1 MiB host→extension** (current official docs:
+  "The maximum size of a single message from the native messaging host is 1 MB"; the
+  extension→host direction is 64 MiB). This is the one wire limit that bites us: a full
+  DSH session history is chunk-heavy — one event per streamed token — so it measured
+  **10.8 MB** for a 99-message session and **92 MB** for a 500-message tail on the live
+  app (2026-08-25, M1 verification). The API pages backwards natively
+  (`beforeSeq`/`maxMessages`, `packages/host/apiproxy/src/api/sessions.schema.ts:141`),
+  but a 500-message page still overshoots the cap, so `shapeHistory` in the pipe shapes
+  every `session.history` response: (1) strips `assistant/chunk` events — the panel
+  renderer renders whole turns from `assistant/message` (its text is authoritative,
+  "covers providers without chunks"), chunks only matter for *live* streaming, where they
+  arrive as tiny individual downlink frames; (2) keeps the **newest** events and drops
+  from the oldest side until the frame is under an 850 KiB budget, reporting
+  `truncatedEarlier`. Verified on three live sessions: 846/848/847 KiB on the wire, all
+  under the cap, newest context intact (turn-end / tool-call tails).
 
 ### 2.5 Every "recognize the installation" need is a stock `/api` method
 
