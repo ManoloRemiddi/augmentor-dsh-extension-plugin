@@ -600,12 +600,22 @@ low-frequency sweep (boot + hourly):
   artifact** — the sweep lists artifacts, so a `session.create`d chat is invisible until
   its first event (true for real chats before the user's first message; the test
   materializes via `session.rename`, which appends a `session/title` event with no LLM).
-  **Deploy = config hot-replace, no restart**: adding a key to the live row in
-  `~/.dsh/cordis.patch.yml` (`chatDir: '~/Augmentor'`) is the documented hot-replace
-  trigger — the running server unloads the M2 instance and loads the M3 source in place;
-  the pipe's plugin-WS reconnect picks the channel back up, and the extension reload
-  ships the new SW/panel. Live acceptance (Save tap → badge → app workspace) pending the
-  user's extension reload.
+  **Deploy = config hot-replace, no restart** — with a correction to the docs: a
+  config-ONLY edit re-applies the *ESM-cached* module (the loader's update diff
+  re-imports only when `name`/`inject`/`group` change — same ESM-cache wall as the
+  M2 zombie), so the live row's `name` pins the vintage with a query string
+  (`index.ts?src=<commit>`); bumping it makes the running server re-import the
+  specifier, dispose the old fiber, and apply the fresh source in place. The
+  pipe's plugin-WS reconnect picks the channel back up (verified on the live
+  server: `chat dir ready` + handshake `chatCwd` within ~1 s of the edit, no
+  restart). **Panel E2E done (`test/m3-e2e.mjs`, real headless Chrome, real SW +
+  NMH pipe, LIVE server + real registry, local Qwen turn): connect → M3 buttons
+  present → prompt → the SW created the session in `~/Augmentor` (cwd pinning) →
+  #save tap flips the badge AND `workspace.list` shows the attach → tap again
+  clears the badge + detach → #openindsh opens a new tab at the app endpoint →
+  probe session archived (the sweep's end state). The whole slice-1 chain is
+  verified against the user's actual deployment; what remains is the user's own
+  browser reload (their SW is still the M2 code in memory) + a confirming tap.
 - **M4 — hardening & packaging**: reconnect/resync audit, error surfaces, version gate,
   install scripts (plugin insert helper + extension zip), README rewrite, decision on
   publishing the plugin upstream vs locally installed.
