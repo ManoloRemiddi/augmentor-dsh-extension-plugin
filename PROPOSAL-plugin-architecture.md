@@ -703,15 +703,22 @@ inventory).
   `native_host_permissions` manifest key in Chrome). The extension **is loaded** in the
   user's Chromium (`extensions.settings` entry for the id, path `augmentor/extension/`).
   Remaining step: side panel → Connect → Sessions → open a conversation → Probe.
-  Pre-flight for that click is proven headlessly by `test/sw-e2e.mjs`: it runs the
-  **real `sw.js`** (vm) against the **real pipe** (spawned via the host manifest,
-  origin argv) against the live server — handshake reaches `ready`, `session.list`
-  returns 32 sessions, `session.history` returns a shaped frame (414 events for the
-  99-message DSH-plugin session, 846 KiB on the wire, zero `assistant/chunk`, final +
-  user messages present), and `fence/probe` persists through the pipe. Caveat: the
-  harness's probe uses Node fetch (no Origin marker → the fenced row reaches the RPC
-  bridge instead of 403-ing); the 403 verdict itself stands on the header-exact
-  headless probe and on Chrome's real SW.
+  Pre-flight for that click is proven headlessly, two levels deep. `test/sw-e2e.mjs`
+  runs the **real `sw.js`** (vm) against the **real pipe** (spawned via the host
+  manifest, origin argv) against the live server — handshake reaches `ready`,
+  `session.list` returns 32 sessions, `session.history` returns a shaped frame (414
+  events for the 99-message DSH-plugin session, 846 KiB on the wire, zero
+  `assistant/chunk`, final + user messages present), and `fence/probe` persists
+  through the pipe. `test/panel-e2e.mjs` goes one level further: the **unmodified
+  `sidepanel.js` + `chat-render.js` module graph in jsdom** on top of the same real
+  SW + pipe — clicking `#connect` reaches `connected`, `#sessions` lists 32 rows,
+  the Probe strip persists through the pipe, and clicking the DSH-plugin session row
+  renders **262 KB of conversation into `#log`** (4 user + 58 assistant bubbles,
+  session title shown, the newest user message's text present in the DOM). What the
+  harnesses cannot prove is Chrome executing the same JS — the click remains the
+  acceptance step. Caveat: the harness probe uses Node fetch (no Origin marker →
+  the fenced row reaches the RPC bridge instead of 403-ing); the 403 verdict itself
+  stands on the header-exact headless probe and on Chrome's real SW.
 
 **Install route decision (supersedes §9's helper sketch).**
 - **M1 (dev, this box):** insert row in `~/.dsh/cordis.patch.yml` with an **absolute path**
