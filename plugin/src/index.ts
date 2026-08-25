@@ -178,53 +178,77 @@ export function apply(ctx: Context, config: Config) {
     console.warn('[dsh-augmentor] action channel has no token resolvable; running open (dev only)')
   }
 
-  const webServer = ctx.get('webServer') as WebServerLike | undefined
-  if (webServer) {
-    // Disposal of the routes runs with the plugin fiber; the web server's
-    // close() force-closes open connections, which drops the pipe sockets.
-    webServer.register({
-      kind: 'exact',
-      path: config.apiPath,
-      handler(req, res) {
-        if (req.method !== 'GET' && req.method !== 'HEAD') {
-          res.writeHead(405, { 'content-type': 'text/plain; charset=utf-8' })
-          res.end('method not allowed')
-          return
-        }
-        const body = JSON.stringify({
-          name: 'dsh-augmentor',
-          protocol: PROTOCOL,
-          version: VERSION,
-          wsPath: config.wsPath,
-          wsTokenRequired: Boolean(resolved.token),
-          wsTokenSource: resolved.source,
-          pipes: pipes.size,
-          time: Date.now(),
-        })
-        res.writeHead(200, { 'content-type': 'application/json' })
-        res.end(body)
-      },
-    })
-    webServer.registerUpgrade({
-      path: config.wsPath,
-      handler(req, socket, head) {
-        if (resolved.token) {
-          let presented: string | null = null
-          try {
-            presented = new URL(req.url ?? '', 'http://localhost').searchParams.get('token')
-          } catch {
-            presented = null
-          }
-          if (presented !== resolved.token) {
-            console.warn('[dsh-augmentor] action channel upgrade rejected (bad or missing token)')
-            socket.destroy()
+  // Action channel registration. On a fresh boot this plugin's apply runs
+  // before the web server's fiber has provided its service (fiber activation
+  // ordering), so `ctx.get('webServer')` is legitimately undefined at apply
+  // time; the service event covers that case. A headless profile never
+  // provides webServer, so the channel simply stays off there.
+  let currentServer: WebServerLike | undefined
+  let routesEffect: { dispose: () => void | Promise<void> } | undefined
+  const registerActionChannel = (webServer: WebServerLike) => {
+    if (webServer === currentServer) return
+    if (routesEffect) routesEffect.dispose() // routes leave with the old server instance
+    currentServer = webServer
+    // Both disposers run with the plugin fiber (HMR instance replacement or
+    // profile teardown), so a re-apply can register again without a
+    // duplicate-route collision.
+    routesEffect = ctx.effect(() => {
+      const disposeRoute = webServer.register({
+        kind: 'exact',
+        path: config.apiPath,
+        handler(req, res) {
+          if (req.method !== 'GET' && req.method !== 'HEAD') {
+            res.writeHead(405, { 'content-type': 'text/plain; charset=utf-8' })
+            res.end('method not allowed')
             return
           }
-        }
-        wss.handleUpgrade(req, socket, head, (ws) => {
-          wss.emit('connection', ws, req)
-        })
-      },
+          const body = JSON.stringify({
+            name: 'dsh-augmentor',
+            protocol: PROTOCOL,
+            version: VERSION,
+            wsPath: config.wsPath,
+            wsTokenRequired: Boolean(resolved.token),
+            wsTokenSource: resolved.source,
+            pipes: pipes.size,
+            time: Date.now(),
+          })
+          res.writeHead(200, { 'content-type': 'application/json' })
+          res.end(body)
+        },
+      })
+      const disposeUpgrade = webServer.registerUpgrade({
+        path: config.wsPath,
+        handler(req, socket, head) {
+          if (resolved.token) {
+            let presented: string | null = null
+            try {
+              presented = new URL(req.url ?? '', 'http://localhost').searchParams.get('token')
+            } catch {
+              presented = null
+            }
+            if (presented !== resolved.token) {
+              console.warn('[dsh-augmentor] action channel upgrade rejected (bad or missing token)')
+              socket.destroy()
+              return
+            }
+          }
+          wss.handleUpgrade(req, socket, head, (ws) => {
+            wss.emit('connection', ws, req)
+          })
+        },
+      })
+      return [disposeRoute, disposeUpgrade]
+    }, 'dsh-augmentor: action channel routes')
+    console.log('[dsh-augmentor] action channel ready (api=%s, ws token: %s)', config.apiPath, resolved.source)
+  }
+
+  const webServer = ctx.get('webServer') as WebServerLike | undefined
+  if (webServer) {
+    registerActionChannel(webServer)
+  } else {
+    console.log('[dsh-augmentor] webServer service not up yet; watching for it (headless profiles never provide it)')
+    ctx.on('internal/service', (name: string, value: unknown) => {
+      if (name === 'webServer') registerActionChannel(value as WebServerLike)
     })
   }
 
@@ -235,28 +259,31 @@ export function apply(ctx: Context, config: Config) {
     parameters: {},
     output: {
       schema: {
+        // dsh-tools value-schema DSL: object nodes carry no `required`
+        // array — a property is required by marking `required: true` inside
+        // its own schema, and `additionalProperties` must be explicit.
         type: 'object',
         additionalProperties: false,
         properties: {
-          ok: { type: 'boolean' },
+          ok: { type: 'boolean', required: true },
           tabs: {
             type: 'array',
             items: {
               type: 'object',
               additionalProperties: false,
               properties: {
-                id: { type: 'number' },
-                url: { type: 'string' },
-                title: { type: 'string' },
-                active: { type: 'boolean' },
-                focusedWindow: { type: 'boolean' },
+                // chrome.tabs reports url/title as null for pending/devtools
+                // tabs and id as undefined while a tab is being torn down.
+                id: { oneOf: [{ type: 'number' }, { type: 'null' }] },
+                url: { oneOf: [{ type: 'string' }, { type: 'null' }] },
+                title: { oneOf: [{ type: 'string' }, { type: 'null' }] },
+                active: { type: 'boolean', required: true },
+                focusedWindow: { type: 'boolean', required: true },
               },
-              required: ['id', 'active', 'focusedWindow'],
             },
           },
           error: { type: 'string' },
         },
-        required: ['ok'],
       },
       render: (_args, value) => [
         { type: 'text', text: value.ok ? `${value.tabs.length} tab(s) open in the user's browser` : value.error ?? 'no tabs' },

@@ -585,6 +585,48 @@ inventory).
   (`{"name":"dsh-augmentor","protocol":"augmentor-pipe/v1","version":"0.1.0","wsPath":"/api/augmentor/ws","pipes":0,…}`);
   WS upgrade → `{"type":"welcome",…}` frame; non-GET → 405. **Exact-route coexistence
   proven**: unknown `/api/*` paths still 404 — the api-proxy prefix is not shadowed.
+- **Fresh-boot service ordering (empirical, root-caused 2026-08-25; this is why the live
+  mount "just worked" and a cold boot did not).** At initial boot, a patch-layer plugin's
+  `apply` runs **before** the webserver fiber provides its service, so
+  `ctx.get('webServer')` is `undefined` at apply time and an `if (webServer)` guard
+  silently skips the route registration forever → `/api/augmentor` 404 on every cold boot,
+  while the same plugin works when hot-mounted (service already present). Source chain:
+  the `Service` base registers its service in the constructor
+  (`packages/host/webserver/src/index.ts` → `super(ctx,'webServer')` →
+  `ctx.reflect.provide`, immediate per `vendor/cordis/src/service.ts:42-59`), and
+  `vendor/cordis/src/reflect.ts:117-146` emits the built-in
+  `'internal/service'(name, value)` event on provide — the house pattern for web plugins
+  is hard `inject = ['webServer']` (the web-app bundle does this and throws if missing),
+  which is **not usable here**: the home-patch row mounts this plugin into *every* profile
+  of the home, including headless compositions with no web server, where a hard inject
+  would PEND/break the user's plain `dsh` runs. **Fix (in `apply`):** try
+  `ctx.get('webServer')` first (hot-mount path, service already present); if absent,
+  subscribe to `ctx.on('internal/service', …)` and register when the service lands —
+  verified empirically to fire <1 s after a cold-boot apply. Registration itself is
+  effect-wrapped (`ctx.effect(() => [disposeRoute, disposeUpgrade], …)`): both route
+  disposers run when the plugin fiber unloads (HMR instance replace, profile teardown),
+  which also fixes a latent duplicate-route bug — the pre-fix bare `register` calls were
+  never disposed, so a config-edit re-apply of the same row would have thrown
+  `webserver: duplicate exact route` and silently failed the instance swap (this
+  retro-explains the earlier "hot-replace didn't pick up new code" observation). Headless
+  profiles: the event never fires, the channel stays off, nothing PENDs.
+- **Real-composition boot test green (`plugin/tests/boot/run.sh`).** Boots a *fresh* `dsh
+  web` under an isolated `DSH_HOME` (symlinked profiles/settings/storages, empty
+  `sessions/`, **no** `cordis.patch.yml` — a second insert row with the same id as the
+  home patch's fails boot with `duplicate loader entry id`, so isolation is required, not
+  just hygiene; `--dump-config` does not honor `DSH_HOME`, only the boot does) with an
+  overlay row carrying an explicit `wsToken` (deterministic gate; asserts no token file
+  is created in the isolated home and the user's `~/.dsh/augmentor-ws-token` is
+  untouched). Asserts: 200 handshake, `wsTokenRequired: true`,
+  `wsTokenSource: "config"`, 405 on POST, wrong-token upgrade refused, right-token
+  upgrade welcomed. **ALL PASS.** The suite also caught a real bug in committed code the
+  running server's ESM-cached module was hiding: the `browser_tabs_list`
+  `output.schema` was written as raw JSON Schema (`required: [...]` arrays) and the
+  dsh-tools authoring DSL rejects it (`schema.required is not supported by the value
+  schema DSL`) — the tool is now written in the DSL (per-property `required: true`,
+  explicit `additionalProperties`, `oneOf` for the nullable `id`/`url`/`title`), and the
+  defineTool crash killed the whole test app on import, proving the tool code path
+  executes at apply.
 - **Reload semantics (source-verified on the rc.2 checkout; this decides dev iteration
   speed):** the patch watcher (`hmr.registerConfig` → `entry.update`,
   `packages/boot/app-boot/src/index.ts:232-265`) re-applies the user layer on every patch-file
@@ -607,6 +649,19 @@ inventory).
   recovery baseline arrives; the action WS connects carrying the token (the pre-token
   instance ignores the query param — a safe version skew: new-plugin/old-pipe refuses
   loudly, old-plugin/new-pipe connects).
+- **Dev pitfall (this box, Node 24.19.0), for the record while debugging the ordering
+  bug above:** temporary diagnostic scaffolding combining a `setInterval` poll with a
+  `globalThis` property write (and diagnostic arrow fns calling `ctx.get(name, false)`)
+  triggered *misleading* engine errors in the stripped module — e.g. `TypeError:
+  setInterval(...) is not a function` reported on an innocent following line, while
+  `typeof setInterval` read `function` two lines earlier; the same statements in a small
+  module, or the identical statements with any one piece removed, ran clean, and the
+  amaro-stripped output (Node 24.19.0 ships amaro 1.1.10; byte-identical to npm
+  amaro 1.1.11 for this file) is verified clean as plain JS. It behaved like
+  a source-text-sensitive V8 anomaly, not a logic bug. The production code contains none
+  of those constructs (no timers, no global writes) and is verified green under the real
+  loader; if plugin code on this box ever throws a `…(...) is not a function` error at a
+  line that doesn't make sense, suspect this first before re-reading the logic.
 
 **Install route decision (supersedes §9's helper sketch).**
 - **M1 (dev, this box):** insert row in `~/.dsh/cordis.patch.yml` with an **absolute path**
