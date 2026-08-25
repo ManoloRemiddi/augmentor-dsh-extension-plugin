@@ -1032,22 +1032,30 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   if (msg?.type === 'fence/probe') {
     // M1 evidence (C1): fetch from THIS origin (chrome-extension://…) — the
     // trust fence judges the request by Origin + sec-fetch-site metadata, so
-    // a service-worker fetch is exactly what the fence sees. The control
-    // fetch (/) proves the network path works regardless. Results are
-    // persisted by the pipe to trace/fence-probe.json.
-    const probePath = async (p) => {
+    // a service-worker fetch is exactly what the fence sees. Three paths:
+    // /api/augmentor (plugin exact route — expected 200, fence is
+    // api-proxy-scoped and exact routes dispatch before the prefix table),
+    // / (static control — network path), and a POST to a stock method route
+    // (/api/session.list — expected 403 forbidden: the fence refusal this
+    // probe exists to document). Results are persisted by the pipe to
+    // trace/fence-probe.json.
+    const probePath = async (method, p, body) => {
       try {
         const t0 = Date.now()
-        const res = await fetch('http://127.0.0.1:3080' + p, { method: 'GET' })
-        const body = await res.text()
-        return { status: res.status, ok: res.ok, ms: Date.now() - t0, body: body.slice(0, 400) }
+        const res = await fetch('http://127.0.0.1:3080' + p, { method, body })
+        const text = await res.text()
+        return { status: res.status, ok: res.ok, ms: Date.now() - t0, body: text.slice(0, 400) }
       } catch (e) {
         return { error: String(e?.message ?? e) }
       }
     }
-    Promise.all([probePath('/api/augmentor'), probePath('/')])
-      .then(async ([api, root]) => {
-        const out = { at: new Date().toISOString(), origin: self.location.origin, api, root }
+    Promise.all([
+      probePath('GET', '/api/augmentor'),
+      probePath('GET', '/'),
+      probePath('POST', '/api/session.list', JSON.stringify({ client: 'augmentor-fence-probe' })),
+    ])
+      .then(async ([api, root, fenced]) => {
+        const out = { at: new Date().toISOString(), origin: self.location.origin, api, root, fenced }
         try {
           await request('trace/fence-probe', out)
         } catch {

@@ -129,23 +129,37 @@ Node process on loopback — the native-messaging host we already ship**: the ex
 `SW ⇄ chrome.runtime.connectNative ⇄ Node helper ⇄ /api + downlinks + plugin action WS`.
 Same topology as today, minus the second DSH runtime.
 
-**Empirical scope refinement (M1, 2026-08-25 — server-side, curl replaying the
-extension's exact headers).** The fence lives in the api-proxy's method routing, not in the
-web server's route table: routes a plugin registers itself are *not* fenced.
+**Empirical scope refinement (M1, 2026-08-25 — server-side, replaying the extension's
+exact headers).** The fence lives in the api-proxy's method routing, not in the web
+server's route table: the web server consults its **exact table before the prefix table**
+(`packages/host/webserver/src/index.ts:256-266` — "Longest-prefix-wins over the prefix
+table *after an exact-table miss*"), so routes a plugin registers itself are dispatched
+before the fenced `/api` prefix route is ever consulted. Re-running the probe headlessly
+(node fetch carrying `Origin: chrome-extension://dgfpmlnbofacjafljfohgmfacobgfjbh`,
+`sec-fetch-site: cross-site`, `sec-fetch-mode: cors`, `sec-fetch-dest: empty` — the fence
+reads only `Host` + `sec-fetch-site` + `origin`, so this is byte-equivalent on the
+decision axes) gives a split verdict, persisted in
+`trace/fence-probe-headless.json`:
 
-| Request (all with `Origin: chrome-extension://dgfpmlnbofacjafljfohgmfacobgfjbh`, `sec-fetch-site: cross-site`, `Host: 127.0.0.1:3080`) | Result |
+| Request (all with `Origin: chrome-extension://…`, `sec-fetch-site: cross-site`, `Host: 127.0.0.1:3080` unless noted) | Result |
 |---|---|
-| `GET /api/augmentor` — plugin exact route | **200** (handshake JSON) |
+| `GET /api/augmentor` — plugin exact route | **200** (handshake JSON — fence bypassed by exact-table precedence) |
 | `GET /` — static control | 200 (ungated) |
 | `POST /api/session.list` — stock method route | **403**, body `forbidden` |
+| `POST /api/session.list` — same path, **no** browser markers (node UA, no Origin) | **200** — reaches the RPC bridge (structured `bad-request` on the non-envelope body: fence passed, validation next) |
 
-Consequences: (1) the SW-direct probe now *documents a split verdict* — the plugin
-handshake is cross-site-reachable, the stock methods are refused; (2) the pipe remains the
-primary transport for the API either way (the plugin route serves a public handshake only,
-no session data, no credentials); (3) the unfenced exact route is an accepted reachability
-posture of our own route — the only sensitive surface on it, the action WS upgrade, is
-token-gated (§7 R4). The client-side half (a real SW fetch of both URLs) is built into the
-panel's fence strip and lands in `trace/fence-probe.json` when the user clicks Probe.
+The fourth row is the control that attributes the 403: same method, same path, only the
+browser markers removed → the request sails through the fence to the RPC layer.
+
+Consequences: (1) the SW-direct probe documents a split verdict — the plugin handshake is
+cross-site-reachable, the stock methods are refused; (2) the pipe remains the primary
+transport for the API either way (the plugin route serves a public handshake only, no
+session data, no credentials); (3) the unfenced exact route is an accepted reachability
+posture of our own route — the only sensitive surface on it, the action WS upgrade
+(`/api/augmentor/ws`, also an exact-table entry outside the fence's two downlink
+wrappers), is token-gated (§7 R4). The client-side half (a real SW fetch of all three
+paths) is built into the panel's fence strip and lands in `trace/fence-probe.json` when
+the user clicks Probe; expected to match the headless run row for row.
 
 The server→client direction **exists and is typed**: `MuxFrame` includes answerable
 server-requests `approval/requested` and `question/requested` (answered over HTTP,
@@ -434,13 +448,16 @@ low-frequency sweep (boot + hourly):
 **C. Empirical checks (small, decisive — do these in milestone M1)**
 
 1. **R1 fence — documented empirically (done, server side).** The code-reading verdict
-   (§2.4) holds for the stock method routes: replaying the extension's exact headers
-   (`Origin: chrome-extension://…`, `sec-fetch-site: cross-site`) against a live method
-   route yields **403 `forbidden`**, while the plugin's exact route returns 200 (fence is
-   api-proxy-scoped, §2.4 table). The client-side half — a real SW fetch of
-   `/api/augmentor` + `/` — ships as the panel's fence strip (Probe button) and records
-   `trace/fence-probe.json` on click; expected to match the curl simulation. The protocol
-   pipe (item B1) is the primary transport regardless — no fallback branch.
+   (§2.4) holds: replaying the extension's exact headers (`Origin: chrome-extension://…`,
+   `sec-fetch-site: cross-site`) against a live method route yields **403 `forbidden`**,
+   while the plugin's exact route returns 200 (exact-table precedence, §2.4 table), and
+   the no-marker control on the same method route returns 200 (fence passed, RPC
+   validation next) — the 403 is attributed, not just observed. Persisted in
+   `trace/fence-probe-headless.json`. The client-side half — a real SW fetch of
+   `/api/augmentor` + `/` + a POST to `/api/session.list` — ships as the panel's fence
+   strip (Probe button) and records `trace/fence-probe.json` on click; expected to match
+   the headless run row for row. The protocol pipe (item B1) is the primary transport
+   regardless — no fallback branch.
 2. **SW keep-alive**: measure Chrome's SW idle-kill with an open WS + ping cadence; pick
    the ping interval (25s) and verify no kill mid-turn.
 3. **Concurrent attach**: GUI + extension on the same session — confirm queue/FIFO
@@ -662,6 +679,17 @@ inventory).
   of those constructs (no timers, no global writes) and is verified green under the real
   loader; if plugin code on this box ever throws a `…(...) is not a function` error at a
   line that doesn't make sense, suspect this first before re-reading the logic.
+- **Browser-half wiring state (verified 2026-08-25).** The native host manifest is
+  installed at `~/.config/chromium/NativeMessagingHosts/com.deepseek.dsh.augmentor.json`
+  → `bin/pipe-host.sh` → `node pipe.mjs`, with `allowed_origins` naming the extension's
+  **key-derived** id `dgfpmlnbofacjafljfohgmfacobgfjbh` (deterministic — the manifest's
+  `key` pins the id regardless of install). Per the current official docs the extension
+  side needs only the `nativeMessaging` permission (present; there is no
+  `native_host_permissions` manifest key in Chrome). What is **not** done yet: the
+  extension is not loaded in the user's Chromium (no entry in
+  `~/.config/chromium/Default/Preferences` for that id) — the browser half starts with
+  **Load unpacked → `augmentor/extension/`**, then side panel → Connect → Sessions →
+  open a conversation → Probe.
 
 **Install route decision (supersedes §9's helper sketch).**
 - **M1 (dev, this box):** insert row in `~/.dsh/cordis.patch.yml` with an **absolute path**
