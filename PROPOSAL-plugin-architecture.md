@@ -120,15 +120,32 @@ The trust fence is a **hardcoded defense, not config**
    `Origin: chrome-extension://<id>` — never equal to `127.0.0.1:3080` → refused.
 
 **Consequence:** a *browser-based* client — the MV3 service worker or a content-script
-fetch — fails checks 2 and 3 on every channel (POST bodies carry Origin; WS handshakes
-always do). The fence is exactly as designed: it admits **non-browser loopback clients**
-(header comment: "Non-browser and remote clients pass the same fence via loopback").
-So the extension cannot dial DSH directly. It talks through a **small Node process on
-loopback — the native-messaging host we already ship**: the existing `bridge.mjs` is
-repurposed into a dumb protocol pipe,
+fetch — fails checks 2 and 3 on the **stock `/api` method routes** (POST bodies carry
+Origin; WS handshakes always do). The fence is exactly as designed: it admits **non-browser
+loopback clients** (header comment: "Non-browser and remote clients pass the same fence via
+loopback"). So the extension cannot dial the DSH API directly. It talks through a **small
+Node process on loopback — the native-messaging host we already ship**: the existing
+`bridge.mjs` is repurposed into a dumb protocol pipe,
 `SW ⇄ chrome.runtime.connectNative ⇄ Node helper ⇄ /api + downlinks + plugin action WS`.
-Same topology as today, minus the second DSH runtime. M1 includes a 15-minute SW-direct
-probe purely to *document* the fence verdict (expected: refused) — not to gate the design.
+Same topology as today, minus the second DSH runtime.
+
+**Empirical scope refinement (M1, 2026-08-25 — server-side, curl replaying the
+extension's exact headers).** The fence lives in the api-proxy's method routing, not in the
+web server's route table: routes a plugin registers itself are *not* fenced.
+
+| Request (all with `Origin: chrome-extension://dgfpmlnbofacjafljfohgmfacobgfjbh`, `sec-fetch-site: cross-site`, `Host: 127.0.0.1:3080`) | Result |
+|---|---|
+| `GET /api/augmentor` — plugin exact route | **200** (handshake JSON) |
+| `GET /` — static control | 200 (ungated) |
+| `POST /api/session.list` — stock method route | **403**, body `forbidden` |
+
+Consequences: (1) the SW-direct probe now *documents a split verdict* — the plugin
+handshake is cross-site-reachable, the stock methods are refused; (2) the pipe remains the
+primary transport for the API either way (the plugin route serves a public handshake only,
+no session data, no credentials); (3) the unfenced exact route is an accepted reachability
+posture of our own route — the only sensitive surface on it, the action WS upgrade, is
+token-gated (§7 R4). The client-side half (a real SW fetch of both URLs) is built into the
+panel's fence strip and lands in `trace/fence-probe.json` when the user clicks Probe.
 
 The server→client direction **exists and is typed**: `MuxFrame` includes answerable
 server-requests `approval/requested` and `question/requested` (answered over HTTP,
@@ -416,10 +433,14 @@ low-frequency sweep (boot + hourly):
 
 **C. Empirical checks (small, decisive — do these in milestone M1)**
 
-1. **R1 fence — verdict already settled by code reading** (§2.4: browser markers fail the
-   cross-site + Origin checks), so M1 spends ~15 minutes *documenting* it empirically: one
-   SW `fetch` + one WS handshake to `/api` with the expected refusal recorded, then the
-   protocol pipe (item B1) is built as the primary transport — no fallback branch.
+1. **R1 fence — documented empirically (done, server side).** The code-reading verdict
+   (§2.4) holds for the stock method routes: replaying the extension's exact headers
+   (`Origin: chrome-extension://…`, `sec-fetch-site: cross-site`) against a live method
+   route yields **403 `forbidden`**, while the plugin's exact route returns 200 (fence is
+   api-proxy-scoped, §2.4 table). The client-side half — a real SW fetch of
+   `/api/augmentor` + `/` — ships as the panel's fence strip (Probe button) and records
+   `trace/fence-probe.json` on click; expected to match the curl simulation. The protocol
+   pipe (item B1) is the primary transport regardless — no fallback branch.
 2. **SW keep-alive**: measure Chrome's SW idle-kill with an open WS + ping cadence; pick
    the ping interval (25s) and verify no kill mid-turn.
 3. **Concurrent attach**: GUI + extension on the same session — confirm queue/FIFO
@@ -454,16 +475,17 @@ low-frequency sweep (boot + hourly):
 | R1 | ~~Extension-Origin requests rejected by the `/api` trust fence~~ — **resolved by code reading** (§2.4): the fence refuses browser-originated requests (`sec-fetch-site: cross-site`; Origin `chrome-extension://…` ≠ Host). Not a risk anymore: the native-host **protocol pipe is the primary transport**, and the SW-direct probe in M1 only documents the verdict | — | Pipe reuses the shipped native-messaging host + the existing bridge code; no new process, no fence exposure |
 | R2 | MV3 SW idle-kill mid-turn | Medium | WS keep-alive ping; resync-on-restart already designed; worst case = panel reconnect |
 | R3 | DSH is pre-release: protocol may break between versions (AGENTS.md: "foundation over blast radius", backends reject old formats) | Medium | Extension reads `host.describe` version at handshake and surfaces incompatibility clearly; document required DSH version per extension version |
-| R4 | Security posture: `/api` is loopback-reachable, "a reachability policy, not authentication" | Low–Med | Inherited from the app's own documented posture (local-only by design); the plugin's action WS additionally carries a generated token so arbitrary local processes can't drive the browser channel |
+| R4 | Security posture: `/api` is loopback-reachable, "a reachability policy, not authentication" | Low–Med | Inherited from the app's own documented posture (local-only by design). The action WS is token-gated (`?token=…` checked at upgrade): the secret is a per-machine file `~/.dsh/augmentor-ws-token` (0600, created at install / first boot — plugin and pipe resolve the same file, so they converge), overridable by `config.wsToken` or `DSH_AUGMENTOR_WS_TOKEN`. *Activation note (M1):* a running process only sees new plugin **source** after a restart (Node ESM module cache, §10), so the M1 instance's action channel stays open-loopback until the next restart — acceptable because M1 is read-only (no prompts, no browser-driving tool traffic); the gate is in force from M2's restart (M4's `dsh plugin add` needs one anyway) |
 | R5 | `browser_*` tools are globally registered: a model in *any* session of that installation can call them; with the extension disconnected they must fail cleanly | Low | Tool handler returns a readable "no browser client connected" result; never blocks the turn |
 | R6 | Two DSH installs/profiles on one machine (this box has several) — which one does the extension attach to? Also: an app bound non-loopback (`--host 0.0.0.0`) refuses the pipe's loopback authority | Low | One running app per port; extension options field for the endpoint (default 3080); plugin card shows the live endpoint; `host.describe` at handshake tells the pipe which deployment it reached |
 
 ## 8. Milestones
 
 - **M1 — prove the connection** (the empirical checks of §6C, plus): plugin skeleton (bundle
-  package shape per §10) with the WS route + one tool (`browser_tabs_list`); **repurposed protocol pipe** (B1) dials a
+  package shape per §10) with the token-gated action WS route + one tool (`browser_tabs_list`);
+  **repurposed protocol pipe** (B1) dials a
   running DSH, and the extension handshakes *through it*, lists sessions, renders one opened
-  session's history. The SW-direct fence probe (C1) is recorded the same day as evidence for
+  session's history. The fence probe (C1) is recorded the same day as evidence for
   the §2.4 verdict. *Exit: an existing DSH conversation is visible in the Augmentor panel.*
 - **M2 — the prompt loop**: `session.create {cwd}` (ephemeral by default, §5) +
   `session.prompt` + live turn rendering + Stop (`session.cancel`); all five browser tools
@@ -551,11 +573,49 @@ only** (persisted namespace, schema validation, live onChange) with the settings
 the panel; the in-page GUI card is deferred (the plugin still shows in the GUI's Plugins
 inventory).
 
+**Live-mount verification (M1, executed on this box against the running server, 2026-08-25).**
+- The published 0.1.1-rc.2 loader accepts the canonical function-plugin form exactly as
+  documented (named exports `name`/`inject`/`Config`/`apply`, no default): hot-mounted from
+  the home-patch insert row **while the server ran** — no restart, no DSH checkout change.
+- The entry was mounted as **source `.ts`, not built**: Node 24's native type stripping loads
+  it directly, and bare imports (`@deepseek-ai/dsh-tools`, `@deepseek-ai/schemastery`, `ws`)
+  resolve from the plugin's own `node_modules` (standalone `pnpm install` in `plugin/`).
+- `ctx.get('webServer')` (optional service) + `register({kind:'exact'})` + `registerUpgrade`
+  all work live: `curl http://127.0.0.1:3080/api/augmentor` → 200 handshake JSON
+  (`{"name":"dsh-augmentor","protocol":"augmentor-pipe/v1","version":"0.1.0","wsPath":"/api/augmentor/ws","pipes":0,…}`);
+  WS upgrade → `{"type":"welcome",…}` frame; non-GET → 405. **Exact-route coexistence
+  proven**: unknown `/api/*` paths still 404 — the api-proxy prefix is not shadowed.
+- **Reload semantics (source-verified on the rc.2 checkout; this decides dev iteration
+  speed):** the patch watcher (`hmr.registerConfig` → `entry.update`,
+  `packages/boot/app-boot/src/index.ts:232-265`) re-applies the user layer on every patch-file
+  change. **Adding** an insert row imports the module for the first time — fresh code, which
+  is why the live mount worked. **Editing the row's `config`** hot-replaces the plugin
+  instance (config.md: "A configuration edit hot-replaces the plugin"), but the module
+  namespace is Node's ESM cache: the Loader imports entries through `import(fileURL)` with no
+  cache-busting (`vendor/loader/src/config/entry.ts:280` → tree import), so **source changes
+  do not reach a running process without a restart**. Empirically confirmed: the token-gate
+  code was added to the source and a `config:` block to the insert row; the running instance
+  kept serving the old handshake shape (no new fields) while the same file loads the new code
+  cleanly under standalone Node. Consequence: the M1 instance runs the pre-token action
+  channel until the next restart (acceptable — M1 is read-only; §7 R4), and M4's
+  `dsh plugin add` restart activates the current code.
+- Pipe standalone run (native-frame harness, no Chrome): `initialize` →
+  `{serverInfo:{name:'dsh-augmentor-pipe', version:'0.1.0', dshVersion:'0.0.1', home, cwd, attachedSessions:6, transport:'dsh-api-pipe'}}`;
+  `augmentor/models` → legacy catalog shape (3 groups; default `mx-qwen`/
+  `Qwen3.8-27B-UD-Q6_K_XL`); `session.list` → all 30 sessions with `projections.values.title`;
+  unknown method → clean error envelope; both downlinks open and the `session/subscribed`
+  recovery baseline arrives; the action WS connects carrying the token (the pre-token
+  instance ignores the query param — a safe version skew: new-plugin/old-pipe refuses
+  loudly, old-plugin/new-pipe connects).
+
 **Install route decision (supersedes §9's helper sketch).**
-- **M1 (dev, this box):** insert row in `~/.dsh/cordis.patch.yml` with an **absolute path** to
-  the built entry → the app's patch live-watcher mounts it **without restarting** the running
-  server. Dependencies (dsh-tools etc. at 0.1.1-rc.2) install into the augmentor repo's own
-  `node_modules` so Node resolution from the plugin file finds them.
+- **M1 (dev, this box):** insert row in `~/.dsh/cordis.patch.yml` with an **absolute path**
+  to the **source `.ts` entry** (no build step in dev — type stripping, verified above) → the
+  app's patch live-watcher mounts it **without restarting** the running server. Dependencies
+  (dsh-tools etc. at 0.1.1-rc.2) install into the plugin's own `node_modules` so Node
+  resolution from the plugin file finds them. Caveat: *source edits* need a restart to
+  reach the running process (reload semantics above); the row's `config` is the documented
+  hot-replace lever for config-only changes.
 - **M4 (distribution):** the bundle manifest + `dsh plugin --profile web add
   github:ManoloRemiddi/augmentor#<sha>` (prepare + allowBuilds) or a tarball; the home-patch
   row is then optional. `dsh plugin add` re-composes the profile and needs a one-time app

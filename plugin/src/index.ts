@@ -9,11 +9,18 @@
  * WebSockets) and connects here over the upgrade route for the browser round
  * trips the tools need.
  *
- * Surface (loopback-reachable; no authentication of its own — reachability
- * is the fence's job, not this plugin's):
+ * Surface (loopback-reachable; reachability is the fence's job, not this
+ * plugin's):
  *   GET <apiPath>   handshake JSON: {name, protocol, version, wsPath, pipes, time}
- *   WS  <wsPath>    pipe channel; frame vocabulary below
+ *   WS  <wsPath>    pipe channel (token-gated, see below); frame vocabulary below
  *   tool browser_tabs_list
+ *
+ * Token gate: the action channel is the one surface that drives the user's
+ * browser, so it takes a token on the upgrade URL (?token=…). Precedence:
+ * config.wsToken (explicit) > the per-machine secret file
+ * $DSH_HOME/augmentor-ws-token (created 0600 on first boot by whichever side
+ * gets there first — the plugin or the pipe read the same file). With no
+ * token resolvable the channel is open, which is logged as a warning.
  *
  * Pipe frame vocabulary (one JSON object per WS message):
  *   pipe → plugin: {type: 'hello', name, version}
@@ -27,7 +34,10 @@
 import type { Context } from '@deepseek-ai/cordis'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { Duplex } from 'node:stream'
-import { randomUUID } from 'node:crypto'
+import { randomBytes, randomUUID } from 'node:crypto'
+import { readFileSync, writeFileSync } from 'node:fs'
+import os from 'node:os'
+import path from 'node:path'
 import z from '@deepseek-ai/schemastery'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { WebSocketServer } from 'ws'
@@ -43,13 +53,41 @@ export interface Config {
   wsPath: string
   /** Timeout in milliseconds for one tool round trip through the pipe to the browser. */
   commandTimeoutMs: number
+  /**
+   * Action-channel token. Empty (default) = fall back to the per-machine
+   * secret file $DSH_HOME/augmentor-ws-token (created on first boot).
+   */
+  wsToken: string
 }
 
 export const Config: z<Config> = z.object({
   apiPath: z.string().default('/api/augmentor'),
   wsPath: z.string().default('/api/augmentor/ws'),
   commandTimeoutMs: z.number().default(15000),
+  wsToken: z.string().default(''),
 })
+
+/** Per-machine action-channel secret: created 0600 on first boot, same path on both sides. */
+const TOKEN_FILE_NAME = 'augmentor-ws-token'
+
+function resolveToken(configured: string): { token: string; source: 'config' | 'file' | 'generated' | 'none' } {
+  if (configured) return { token: configured, source: 'config' }
+  const home = process.env.DSH_HOME ?? path.join(os.homedir(), '.dsh')
+  const file = path.join(home, TOKEN_FILE_NAME)
+  try {
+    const existing = readFileSync(file, 'utf8').trim()
+    if (existing) return { token: existing, source: 'file' }
+  } catch {
+    /* first boot: generate */
+  }
+  const token = randomBytes(16).toString('hex')
+  try {
+    writeFileSync(file, token + '\n', { mode: 0o600 })
+  } catch {
+    /* unresolvable home dir: fall back to an unshared ephemeral token */
+  }
+  return { token, source: 'generated' }
+}
 
 /** Pipe protocol revision; the pipe logs it in its trace for fence-probe evidence. */
 const PROTOCOL = 'augmentor-pipe/v1'
@@ -135,6 +173,11 @@ export function apply(ctx: Context, config: Config) {
     pipe.on('error', drop)
   })
 
+  const resolved = resolveToken(config.wsToken)
+  if (resolved.source === 'none' || !resolved.token) {
+    console.warn('[dsh-augmentor] action channel has no token resolvable; running open (dev only)')
+  }
+
   const webServer = ctx.get('webServer') as WebServerLike | undefined
   if (webServer) {
     // Disposal of the routes runs with the plugin fiber; the web server's
@@ -153,6 +196,8 @@ export function apply(ctx: Context, config: Config) {
           protocol: PROTOCOL,
           version: VERSION,
           wsPath: config.wsPath,
+          wsTokenRequired: Boolean(resolved.token),
+          wsTokenSource: resolved.source,
           pipes: pipes.size,
           time: Date.now(),
         })
@@ -163,6 +208,19 @@ export function apply(ctx: Context, config: Config) {
     webServer.registerUpgrade({
       path: config.wsPath,
       handler(req, socket, head) {
+        if (resolved.token) {
+          let presented: string | null = null
+          try {
+            presented = new URL(req.url ?? '', 'http://localhost').searchParams.get('token')
+          } catch {
+            presented = null
+          }
+          if (presented !== resolved.token) {
+            console.warn('[dsh-augmentor] action channel upgrade rejected (bad or missing token)')
+            socket.destroy()
+            return
+          }
+        }
         wss.handleUpgrade(req, socket, head, (ws) => {
           wss.emit('connection', ws, req)
         })

@@ -30,6 +30,17 @@ EOF
 chmod +x "$BRIDGE_SH"
 [ -f "$AUGMENTOR_DIR/bin/dsh-browser" ] && chmod +x "$AUGMENTOR_DIR/bin/dsh-browser" || true
 
+# Per-machine action-channel secret (drives the user's browser). The plugin
+# and the pipe both read this file; creating it at install time makes the
+# first pipe boot deterministic. 0600: same user only.
+TOKEN_FILE="$HOME/.dsh/augmentor-ws-token"
+if [ ! -f "$TOKEN_FILE" ]; then
+  mkdir -p "$HOME/.dsh"
+  "$NODE_BIN" -e "process.stdout.write(require('crypto').randomBytes(16).toString('hex'))" > "$TOKEN_FILE"
+  chmod 600 "$TOKEN_FILE"
+  echo "created $TOKEN_FILE"
+fi
+
 mkdir -p "$CONFIG_DIR/NativeMessagingHosts"
 OUT="$CONFIG_DIR/NativeMessagingHosts/$HOST_NAME.json"
 cat > "$OUT" <<EOF

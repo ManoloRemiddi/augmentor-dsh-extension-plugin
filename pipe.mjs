@@ -38,11 +38,12 @@
  *   shutdown              {ok:true}, then clean exit
  * Everything else passes through verbatim to POST /api/<method>.
  */
-import { writeFileSync } from 'node:fs'
-import { readFile, writeFile, mkdir } from 'node:fs/promises'
+import { readFileSync, writeFileSync } from 'node:fs'
+import { readFile, mkdir } from 'node:fs/promises'
 import path from 'node:path'
+import os from 'node:os'
 import { fileURLToPath } from 'node:url'
-import { randomUUID } from 'node:crypto'
+import { randomBytes } from 'node:crypto'
 import WebSocket from 'ws'
 
 const VERSION = '0.1.0'
@@ -50,6 +51,29 @@ const AUGMENTOR_DIR = path.dirname(fileURLToPath(import.meta.url))
 const TRACE_DIR = path.join(AUGMENTOR_DIR, 'trace')
 const DSH_BASE = (process.env.DSH_AUGMENTOR_URL ?? 'http://127.0.0.1:3080').replace(/\/+$/, '')
 const PLUGIN_WS_PATH = '/api/augmentor/ws'
+
+// Action-channel token (drives the user's browser, so it is gated). Same
+// resolution as the plugin: explicit env > $DSH_HOME/augmentor-ws-token
+// (0600, created by whichever side boots first) > generate. Both sides of
+// the channel converge on the same secret.
+function resolveToken() {
+  if (process.env.DSH_AUGMENTOR_WS_TOKEN) return { token: process.env.DSH_AUGMENTOR_WS_TOKEN, source: 'env' }
+  const home = process.env.DSH_HOME ?? path.join(os.homedir(), '.dsh')
+  const file = path.join(home, 'augmentor-ws-token')
+  try {
+    const existing = readFileSync(file, 'utf8').trim()
+    if (existing) return { token: existing, source: 'file' }
+  } catch {
+    /* first boot: generate */
+  }
+  const token = randomBytes(16).toString('hex')
+  try {
+    writeFileSync(file, token + '\n', { mode: 0o600 })
+  } catch {
+    /* unresolvable home: the plugin's copy (if any) still gates; we'll fail the upgrade */
+  }
+  return { token, source: 'generated' }
+}
 
 // ---------------------------------------------------------------- .env
 // Minimal KEY=VALUE fallback merge (existing process env wins). The pipe no
@@ -160,9 +184,12 @@ let pluginWs = null
 function pluginSend(obj) {
   if (pluginWs && pluginWs.readyState === WebSocket.OPEN) pluginWs.send(JSON.stringify(obj))
 }
+const WS_TOKEN = resolveToken()
+
 function openPluginWs() {
   if (pluginWs) return
-  const ws = new WebSocket(`${DSH_BASE.replace(/^http/, 'ws')}${PLUGIN_WS_PATH}`)
+  const url = `${DSH_BASE.replace(/^http/, 'ws')}${PLUGIN_WS_PATH}${WS_TOKEN.token ? `?token=${encodeURIComponent(WS_TOKEN.token)}` : ''}`
+  const ws = new WebSocket(url)
   pluginWs = ws
   ws.on('open', () => log('plugin ws connected', PLUGIN_WS_PATH))
   ws.on('message', (data) => {
@@ -333,6 +360,7 @@ async function boot() {
   }
   openDownlink('mux')
   openDownlink('host')
+  log('action-channel token source:', WS_TOKEN.source)
   openPluginWs()
 }
 
