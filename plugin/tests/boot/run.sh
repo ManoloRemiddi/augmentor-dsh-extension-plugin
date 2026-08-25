@@ -98,6 +98,10 @@ printf '%s' "$BODY" | grep -q '"wsTokenRequired":true' && check "handshake repor
 printf '%s' "$BODY" | grep -q '"wsTokenSource":"config"' && check "token source is config" ok ok || { log "FAIL: token source: $BODY"; FAIL=1; }
 # M3: the handshake carries the pinned chat dir (the SW creates sessions in it).
 printf '%s' "$BODY" | grep -q "\"chatCwd\":\"$CHATDIR\"" && check "handshake reports chatCwd" ok ok || { log "FAIL: handshake chatCwd: $BODY"; FAIL=1; }
+# The persona preset id (zod default; the overlay never sets it) — the M3 leg
+# below creates a session under it, which fails loud if the roster (the
+# user-root symlinked into the isolated home) does not carry the preset.
+printf '%s' "$BODY" | grep -q "\"agentPreset\":\"augmentor\"" && check "handshake reports agentPreset" ok ok || { log "FAIL: handshake agentPreset: $BODY"; FAIL=1; }
 
 # 2. non-GET on the route -> 405
 check "non-GET is 405" 405 "$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/api/augmentor")"
@@ -147,8 +151,8 @@ fi
 # session.create (cwd = chat dir) -> save (workspace attach) -> unsave ->
 # the fast sweep archives the stale unattached session (sub-second retention
 # in the overlay). Runs as one node leg against HTTP + the token-gated WS.
-M3_OUT=$("$NODE_BIN" - "$BASE" "$PLUGIN_DIR" "$CHATDIR" <<'EOF'
-const [base, pluginDir, chatDir] = process.argv.slice(2)
+M3_OUT=$("$NODE_BIN" - "$BASE" "$PLUGIN_DIR" "$CHATDIR" "$ISOLATED_HOME" <<'EOF'
+const [base, pluginDir, chatDir, isolatedHome] = process.argv.slice(2)
 const WebSocket = require(require('path').join(pluginDir, 'node_modules', 'ws'))
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 async function dsh(method, payload) {
@@ -166,14 +170,41 @@ async function dsh(method, payload) {
 }
 async function main() {
   const SID = 'boot-m3-test'
-  // The extension's own contract: sessions are created IN the chat dir.
-  await dsh('session.create', { sessionId: SID, cwd: chatDir })
+  // The extension's own contract: sessions are created IN the chat dir, on
+  // the Augmentor persona preset (the SW passes exactly this). An unknown
+  // preset id makes session.create fail loud, so this line doubles as the
+  // "the roster carries the preset" check.
+  await dsh('session.create', { sessionId: SID, cwd: chatDir, agentPreset: 'augmentor' })
   // A created-but-never-prompted session has NO persistence artifact, so the
   // sweep (which lists artifacts) cannot see it — true for real extension
   // chats only before their first message. rename appends a session/title
   // event without any LLM, materializing the artifact the way the user's
   // first message would, so the housekeeping leg has a real header to find.
   await dsh('session.rename', { sessionId: SID, title: 'm3 boot test' })
+  // The rename materialized the artifact; its header must carry the preset
+  // (the persona is what the agent actually gets for every later prompt).
+  const { readFileSync, readdirSync, existsSync } = require('node:fs')
+  const { zstdDecompressSync } = require('node:zlib')
+  const { execSync } = require('node:child_process')
+  let header = null
+  // The event store flushes asynchronously — poll briefly for the artifact.
+  for (let i = 0; i < 20 && !header; i++) {
+    for (const dir of readdirSync(`${isolatedHome}/sessions`)) {
+      const f = `${isolatedHome}/sessions/${dir}/${SID}/session.jsonl.zstd`
+      if (existsSync(f)) {
+        header = zstdDecompressSync(readFileSync(f)).toString('utf8').split('\n')[0]
+        break
+      }
+    }
+    if (!header) await sleep(250)
+  }
+  if (!header || !header.includes('"agentPreset":"augmentor"')) {
+    let tree = ''
+    try { tree = execSync(`find ${isolatedHome}/sessions -maxdepth 3 | head -40`, { encoding: 'utf8' }) } catch {}
+    console.log(`M3FAIL: session header lacks the preset ${JSON.stringify(header)}\n${tree}`)
+    process.exit(1)
+  }
+  console.log('M3PASS: session header carries agentPreset augmentor (persona wired)')
   const ws = new WebSocket(`${base.replace(/^http/, 'ws')}/api/augmentor/ws?token=boot-test-token-0123456789abcdef`)
   await new Promise((res, rej) => { ws.on('open', res); ws.on('error', (e) => rej(e)) })
   const waiters = new Map()

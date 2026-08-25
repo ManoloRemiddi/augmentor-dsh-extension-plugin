@@ -171,6 +171,21 @@ if (newIds.length !== 1) fail(`expected exactly one new ${CHATDIR} session, got 
 const SID = newIds[0]
 process.stderr.write(`[m3] new session ${SID} in ${CHATDIR} (cwd pinning)\n`)
 
+// ---------- 4b. The session runs on the Augmentor persona preset ----------
+// The SW passes agentPreset from the plugin handshake; the header is what
+// every prompt in this chat actually gets (the browser-control identity).
+{
+  const { zstdDecompressSync } = await import('node:zlib')
+  const sessionsRoot = path.join(os.homedir(), '.dsh', 'sessions')
+  let presetHeader = null
+  for (const dir of fs.readdirSync(sessionsRoot)) {
+    const f = path.join(sessionsRoot, dir, SID, 'session.jsonl.zstd')
+    if (fs.existsSync(f)) { presetHeader = zstdDecompressSync(fs.readFileSync(f)).toString('utf8').split('\n')[0]; break }
+  }
+  if (!presetHeader || !presetHeader.includes('"agentPreset":"augmentor"')) fail(`session header lacks the Augmentor preset: ${presetHeader}`)
+  process.stderr.write('[m3] session header carries agentPreset augmentor (persona wired)\n')
+}
+
 // ---------- 5. Tap #save -> badge + workspace attach ----------
 const saveState = () => ev('(() => ({ text: document.getElementById("save").textContent, cls: document.getElementById("save").className }))()')
 if ((await saveState()).text.trim() !== '☆ Save') fail('badge should start unsaved', await saveState())

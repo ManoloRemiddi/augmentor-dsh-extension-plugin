@@ -12,7 +12,7 @@
  * Surface (loopback-reachable; reachability is the fence's job, not this
  * plugin's):
  *   GET <apiPath>   handshake JSON: {name, protocol, version, wsPath, pipes,
- *                   chatCwd, saved, time}
+ *                   chatCwd, agentPreset, saved, time}
  *   WS  <wsPath>    pipe channel (token-gated, see below); frame vocabulary below
  *   tools browser_tabs_list / browser_navigate / browser_snapshot /
  *         browser_click / browser_type (the M2 browser tool set)
@@ -83,6 +83,17 @@ export interface Config {
    * that cannot be prepared fails the plugin loudly.
    */
   chatDir: string
+  /**
+   * Agent preset the extension sessions are created with (session.create
+   * meta `agentPreset`). Carries the Augmentor persona — the
+   * browser-control identity the old bridge passed as DSH_SYSTEM_PROMPT,
+   * ported to the five browser_* tools — shipped as the user preset
+   * $DSH_HOME/.agent-presets/augmentor (source: augmentor/presets/augmentor).
+   * The SW passes it only when the handshake carries one, so a roster
+   * without the preset degrades to the deployment default instead of
+   * failing session.create.
+   */
+  agentPreset: string
   /** Title of the workspace the Save button attaches chats to. */
   workspaceTitle: string
   /**
@@ -108,6 +119,7 @@ export const Config: z<Config> = z.object({
   commandTimeoutMs: z.number().default(30000),
   wsToken: z.string().default(''),
   chatDir: z.string().default('~/Augmentor'),
+  agentPreset: z.string().default('augmentor'),
   workspaceTitle: z.string().default('Augmentor Chat'),
   retentionDays: z.number().default(14),
   deleteAfterDays: z.number().default(0),
@@ -470,6 +482,7 @@ export function apply(ctx: Context, config: Config) {
             wsTokenRequired: Boolean(resolved.token),
             wsTokenSource: resolved.source,
             chatCwd: chatDir,
+            agentPreset: config.agentPreset,
             saved,
             pipes: pipes.size,
             time: Date.now(),

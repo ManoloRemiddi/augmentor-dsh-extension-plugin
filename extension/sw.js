@@ -56,9 +56,11 @@ const state = {
   homeDir: null,
   // M3 chat lifecycle (from the plugin's handshake, folded into initialize):
   // the dedicated chat directory every new session is created in (Save can
-  // attach such a session to its workspace), the running DSH app's base URL
+  // attach such a session to its workspace), the agent preset new sessions
+  // are created with (the Augmentor persona), the running DSH app's base URL
   // (Open-in-DSH button), and the sessions already saved there (badge).
   chatCwd: null,
+  agentPreset: null,
   endpoint: null,
   saved: new Set(),
   // Session entries the panel renders (events + port/prompt/handshake/status).
@@ -243,6 +245,7 @@ function ensurePort() {
       // M3: the plugin's chat-lifecycle state rides in serverInfo.augmentor;
       // the pipe's endpoint (serverInfo.endpoint) feeds Open-in-DSH.
       state.chatCwd = result?.serverInfo?.augmentor?.chatCwd ?? null
+      state.agentPreset = result?.serverInfo?.augmentor?.agentPreset ?? null
       state.endpoint = result?.serverInfo?.endpoint ?? null
       state.saved = new Set(result?.serverInfo?.augmentor?.saved ?? [])
       // M2: resume the conversation across the SW restart — if the DSH
@@ -990,6 +993,10 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
             await request('session.create', {
               sessionId: SESSION_ID,
               ...(cwd ? { cwd } : {}),
+              // The Augmentor persona (browser-control identity + the
+              // browser_* tool contract); absent when the plugin did not
+              // publish one, in which case the app default applies.
+              ...(state.agentPreset ? { agentPreset: state.agentPreset } : {}),
             })
             broadcast(log('handshake', { event: 'session-created', sessionId: SESSION_ID }))
           }
