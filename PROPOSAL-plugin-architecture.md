@@ -875,3 +875,60 @@ mechanism.**
 
 **Note.** Existing panel sessions keep their creation-time preset — the
 persona applies from the next new chat (the panel "New chat" button).
+
+## 12. Addendum — Playwright-MCP drift, veil hold (2026-08-26)
+
+**Symptom.** The persona worked for the first ~8 steps of a real task, then
+the agent drifted: after two failed `browser_click` selectors it switched to
+`mcp__playwright__*` tools and got lost between two browser interfaces. The
+frost veil flickered on/off between steps instead of holding for the turn.
+In-app (DSH web app) sessions named for browser work were equally confused:
+the user said "I'm already logged in", but the agent acted on a browser the
+user could not see.
+
+**Root cause (three independent faults).**
+1. **Playwright MCP on every session.** The user's web-profile patch
+   (`~/.dsh/profiles/web/cordis.patch.yml`) mounts `@deepseek-ai/dsh-mcp-client`
+   (`serverName: playwright` → `mcp__playwright__*`) in the profile ROOT
+   realm, driving its own headless Chromium (`--headless`, private
+   `--user-data-dir`). Root-realm tools reach every session — including
+   `augmentor`-preset ones — and `dsh-mcp-client` has no per-agent scoping.
+   The model, mid-failure, found a second, richer browser toolset and took
+   it. Its headless profile has none of the user's logins, which is exactly
+   why the "I'm already logged in" mismatch appeared in-app: the standard
+   preset gives no guidance, so the model picks Playwright (20 tools) over
+   `browser_*` (5) and works in the invisible, logged-out browser.
+2. **Veil hold was dead code.** `sw.js` declared `turnActive` as
+   "true from prompt to turn/end" and the `turn/end` handler cleared it, but
+   no code ever SET it — so `overlayShow` always armed the 4 s per-action
+   idle fade and the veil dropped between steps (each one re-raised it).
+3. **In-app sessions carry no preset picker.** The web app creates sessions
+   on the deployment default (`standard`); a session's preset is
+   creation-time meta, so the pre-persona in-app session cannot be converted
+   in place.
+
+**Fix.**
+- **Persona v2** (`presets/augmentor/agent.cordis.yml`): a new section,
+  *Other browser tools are forbidden* — named prohibition of
+  `mcp__playwright__*` (and any non-`browser_*` browser tool) with the
+  reason the model can weigh on its own: they drive a DIFFERENT, headless
+  browser without the user's logins — plus the recovery rule for the exact
+  observed drift trigger: selector matched nothing → snapshot, pick a
+  selector from the real content, never switch browser tools.
+- **sw.js**: `turnActive = true` when the `session.prompt` accept lands
+   (only on a real accept — a rejected prompt must not hold a veil). The
+   veil now holds for the whole turn (first action raises, `turn/end`
+   shows "Done ✓" and fades — the existing path), which is the intended
+   "on while the AI controls the browser" semantics.
+
+**Deployment notes.**
+- Preset discovery is UNMEMOIZED (`agent-presets` re-reads the roots on
+  every `resolve()`), so the new persona reaches new sessions on the running
+  server with no restart and no plugin change — no `?src=` bump needed.
+- The SW change requires a one-time extension reload; then a NEW panel chat
+  exercises both fixes (the five `browser_*` tools stay the only browser
+  surface, the veil holds across the task).
+- The Playwright MCP stays mounted: it is the user's own headless
+  automation for DSH sessions. The product boundary is now explicit — the
+  PANEL is Augmentor (real browser, persona); in-app sessions are ordinary
+  DSH (Playwright = a separate, invisible browser).

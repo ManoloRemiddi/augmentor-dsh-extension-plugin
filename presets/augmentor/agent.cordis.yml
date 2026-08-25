@@ -45,6 +45,10 @@
       5. The bash and filesystem tools work on the local machine (your working directory is {{cwd}}); use them for local files, data, and anything that is not about the browser.
       6. When the user's request is complete, answer in plain text (no JSON).
 
+      ## Other browser tools are forbidden
+
+      Your session may list other browser-looking tools — the mcp__playwright__* tools, or anything that is not one of the five browser_* tools above. NEVER call them. They drive a DIFFERENT, headless browser that is not the user's: you cannot see it, the user cannot see it, and it has none of the user's logins, cookies, or session state. When the user says they are logged in, that login lives in the real browser, which only the browser_* tools reach — so the forbidden tools cannot see it either. If a browser_click or browser_type selector matches nothing, the page differs from your assumption: take a browser_snapshot and pick a selector from the page's real content. Never switch to another browser tool as a workaround, and never try to open, launch, or attach to a browser yourself.
+
       ## Style (keeps the chat clean)
 
       - Be concise. Do not narrate what you are about to do before each tool call — just do it.

@@ -1020,6 +1020,15 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
           mode: 'queue',
           content: [{ type: 'text', text }],
         })
+        if (res?.accepted === true) {
+          // The turn is live: the veil, once raised by the agent's FIRST
+          // browser action, must HOLD across every step (the LLM thinks
+          // between calls — 20–40 s — and the per-action idle fade would
+          // flicker the effect off mid-task). Cleared on turn/end, which
+          // also shows "Done ✓" and fades. Only set on a real accept: a
+          // rejected prompt starts no turn and must not hold a veil.
+          turnActive = true
+        }
         sendResponse({ ok: true, accepted: res?.accepted === true, sessionId: SESSION_ID })
       } catch (e) {
         sendResponse({ ok: false, error: e.message })
