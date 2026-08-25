@@ -538,9 +538,36 @@ low-frequency sweep (boot + hourly):
   (`test/m2-e2e.mjs`, CDP): prompt → assistant reply rendered in the panel (default model
   deepseek-official/deepseek-v4-flash), picker round-trip (DeepSeek-V4-Flash →
   Qwen3.8-27B local), created session visible in `session.list`, M1 regressions intact
-  (403 fence row, target session renders 262 KB). *Remaining for M2: the five browser
-  tools + veil round-trip (the plugin registers `browser_tabs_list` today; the rest of the
-  tool set + sticky work-tab + veil lifecycle land next).*
+  (403 fence row, target session renders 262 KB). **Browser tools + veil round-trip
+  done (2026-08-25) — M2 complete.** The plugin registers the full M2 set
+  (`browser_tabs_list / navigate / snapshot / click / type`; schemas in the
+  value-schema DSL, `commandTimeoutMs` 30 s for navigate). Two footnotes from
+  acceptance: **(1) zombie live instance.** A JSON-Schema `required` array throws
+  `JsonSchemaError` at `defineTool` under dsh-tools, which aborts the plugin's
+  `apply()` *after* the webServer routes are already registered (they are set up
+  imperatively, no disposer in that vintage) — a running server that first imported
+  the pre-fix source therefore keeps a zombie instance: handshake alive, pipe
+  channel up, **zero tools registered, no token gate**. ESM never re-imports plugin
+  source in a live process (the web bundle mounts watch-only HMR with an empty
+  module root), so **a restart is the only fix** — no code change needed; the next
+  boot loads the fixed source (all five tools + token gate). **(2) acceptance
+  evidence** (`test/tools-e2e.mjs`): isolated `dsh web` boot (throwaway DSH_HOME
+  symlinking profiles/settings/`.credentials.yaml`/… + token overlay →
+  `wsTokenSource=config`), real headless Chromium + the real extension + the pipe
+  pointed at the isolated server, local test page. The agent turn (app-default
+  deepseek-official/deepseek-v4-flash) called the five tools in the exact
+  instructed order — `session.history` `tool/call` sequence
+  `[tabs_list, navigate, click, type, snapshot]` — and reported `TABS=2
+  STATUS=CLICKED ECHO=hi M2`; the real page DOM was asserted independently
+  (`#status`='CLICKED', `#box`/`#echo`='hi M2') and the **frost veil was observed
+  on the worked tab** (250 ms CDP sampling, `veilSeen=true`). The harness retries a
+  turn that dies on the known-flaky CloudFront route to api.deepseek.com before any
+  tool ran (measured 2-in-3 requests timing out for minutes at a time from this
+  network) and judges tool order on `tool/call` events, not name occurrences (tool
+  names also appear in the request/context schema block). *M2 exit — a full
+  browser-agent conversation through the extension, driven by the user's own DSH
+  model — is met on a fresh boot; the user's running server gains everything (five
+  tools, token gate) on its next restart.*
 - **M3 — awareness, sessions & parity**: session picker/search, **Save button + Augmentor Chat workspace + housekeeping sweep**
   (§5) (model picker done early with M2 — `session.selectModel` on the live session), **Open-in-DSH button**, approval/question UI, keep-alive tuning, settings
   (host-side namespace + panel-owned UI — in-page GUI card deferred, §10; incl. dedicated

@@ -13,7 +13,8 @@
  * plugin's):
  *   GET <apiPath>   handshake JSON: {name, protocol, version, wsPath, pipes, time}
  *   WS  <wsPath>    pipe channel (token-gated, see below); frame vocabulary below
- *   tool browser_tabs_list
+ *   tools browser_tabs_list / browser_navigate / browser_snapshot /
+ *         browser_click / browser_type (the M2 browser tool set)
  *
  * Token gate: the action channel is the one surface that drives the user's
  * browser, so it takes a token on the upgrade URL (?token=…). Precedence:
@@ -51,7 +52,7 @@ export interface Config {
   apiPath: string
   /** Exact WS upgrade route the pipe connects to. */
   wsPath: string
-  /** Timeout in milliseconds for one tool round trip through the pipe to the browser. */
+  /** Timeout in milliseconds for one tool round trip through the pipe to the browser (the navigate action may wait up to ~20s for the page load). */
   commandTimeoutMs: number
   /**
    * Action-channel token. Empty (default) = fall back to the per-machine
@@ -63,7 +64,7 @@ export interface Config {
 export const Config: z<Config> = z.object({
   apiPath: z.string().default('/api/augmentor'),
   wsPath: z.string().default('/api/augmentor/ws'),
-  commandTimeoutMs: z.number().default(15000),
+  commandTimeoutMs: z.number().default(30000),
   wsToken: z.string().default(''),
 })
 
@@ -109,6 +110,31 @@ interface BrowserTab {
   title: string | null
   active: boolean
   focusedWindow: boolean
+}
+
+/** One navigate round trip as the extension reports it. */
+interface BrowserNavigateResult {
+  tabId?: number
+  url?: string
+  title?: string | null
+  newTab?: boolean
+}
+
+/** One snapshot round trip as the extension reports it. */
+interface BrowserSnapshotResult {
+  title?: string
+  url?: string
+  text?: string
+  links?: { text: string; href: string }[]
+}
+
+/** One click/type round trip as the extension reports it (action-level ok). */
+interface BrowserElementResult {
+  ok?: boolean
+  error?: string
+  tag?: string
+  text?: string
+  name?: string
 }
 
 /** Structural view of the host web server; the service lives outside this bundle's dependency graph. */
@@ -295,6 +321,156 @@ export function apply(ctx: Context, config: Config) {
       if (!round.ok) return { ok: false, error: round.error }
       const value = round.result as { tabs?: BrowserTab[] } | undefined
       return { ok: true, tabs: value?.tabs ?? [] }
+    },
+  }))
+
+  /**
+   * The M2 browser tool set (proposal line 272): everything acts on the
+   * extension's STICKY WORK TAB — the tab the agent is working in (the
+   * focused tab of the user's last-focused window unless a navigate created
+   * a dedicated one). Each action round-trips plugin -> pipe -> extension
+   * action WS -> real tab, and the extension raises the frost veil on the
+   * acted-upon tab while it runs, so the user always sees what is happening
+   * and where.
+   */
+  const act = (params: Record<string, unknown>) => browserRequest(params, config.commandTimeoutMs)
+
+  ctx.tools.register(defineTool({
+    name: 'browser_navigate',
+    description:
+      'Open an http(s) URL in the user\'s real browser. It navigates the agent\'s current work tab (creating a dedicated tab if there is no workable one) and a frost veil with progress is shown on that tab while it runs. Returns the settled URL and page title. Prefer this over any other way of reaching a page, then use browser_snapshot to read what loaded.',
+    parameters: {
+      url: { type: 'string', required: true, description: 'The http or https URL to open.' },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          ok: { type: 'boolean', required: true },
+          url: { type: 'string' },
+          title: { oneOf: [{ type: 'string' }, { type: 'null' }] },
+          newTab: { type: 'boolean' },
+          error: { type: 'string' },
+        },
+      },
+      render: (_args, value) => [
+        { type: 'text', text: value.ok ? `Opened ${value.url ?? 'a page'}${value.title ? ` \u2014 \u201C${value.title}\u201D` : ''}${value.newTab ? ' (new tab)' : ''}` : `navigate failed: ${value.error ?? 'unknown error'}` },
+      ],
+    },
+    async execute(args, exec) {
+      if (exec.signal.aborted) throw new Error('cancelled')
+      const round = await act({ action: 'navigate', url: args.url })
+      if (!round.ok) return { ok: false, error: round.error }
+      const value = round.result as BrowserNavigateResult | undefined
+      return { ok: true, url: value?.url ?? String(args.url), title: value?.title ?? null, newTab: Boolean(value?.newTab) }
+    },
+  }))
+
+  ctx.tools.register(defineTool({
+    name: 'browser_snapshot',
+    description:
+      'Read the agent\'s current work tab in the user\'s browser: page title, URL, visible text (up to 6000 characters) and the first 40 links. This is how you see a page after browser_navigate and before browser_click / browser_type. Fails when the work tab is not a readable http(s) page (e.g. the new-tab page).',
+    parameters: {},
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          ok: { type: 'boolean', required: true },
+          title: { type: 'string' },
+          url: { type: 'string' },
+          text: { type: 'string' },
+          links: {
+            type: 'array',
+            items: {
+              type: 'object',
+              additionalProperties: false,
+              properties: {
+                text: { type: 'string', required: true },
+                href: { type: 'string', required: true },
+              },
+            },
+          },
+          error: { type: 'string' },
+        },
+      },
+      render: (_args, value) => [
+        { type: 'text', text: value.ok ? `Page ${value.title ?? ''} (${value.url ?? 'unknown'}) \u2014 ${(value.text ?? '').length} chars, ${value.links?.length ?? 0} link(s)` : `snapshot failed: ${value.error ?? 'unknown error'}` },
+      ],
+    },
+    async execute(_args, exec) {
+      if (exec.signal.aborted) throw new Error('cancelled')
+      const round = await act({ action: 'snapshot' })
+      if (!round.ok) return { ok: false, error: round.error }
+      const value = round.result as BrowserSnapshotResult | undefined
+      return { ok: true, title: value?.title ?? '', url: value?.url ?? '', text: value?.text ?? '', links: value?.links ?? [] }
+    },
+  }))
+
+  ctx.tools.register(defineTool({
+    name: 'browser_click',
+    description:
+      'Click an element in the agent\'s current work tab in the user\'s browser, identified by a CSS selector. The element pulses visibly in the user\'s accent color, so the user sees exactly where the click lands. Use browser_snapshot first to choose a selector from the visible page. Returns the clicked element\'s tag and a human-readable name, or an error when no element matches the selector.',
+    parameters: {
+      selector: { type: 'string', required: true, description: 'CSS selector of the element to click, e.g. "#save" or "button.login".' },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          ok: { type: 'boolean', required: true },
+          tag: { type: 'string' },
+          text: { type: 'string' },
+          name: { type: 'string' },
+          error: { type: 'string' },
+        },
+      },
+      render: (_args, value) => [
+        { type: 'text', text: value.ok ? `Clicked ${value.name ?? value.tag ?? 'an element'}${value.text ? ` \u201C${value.text}\u201D` : ''}` : `click failed: ${value.error ?? 'unknown error'}` },
+      ],
+    },
+    async execute(args, exec) {
+      if (exec.signal.aborted) throw new Error('cancelled')
+      const round = await act({ action: 'click', selector: args.selector })
+      if (!round.ok) return { ok: false, error: round.error }
+      const value = round.result as BrowserElementResult | undefined
+      if (value?.ok === false) return { ok: false, error: value.error ?? 'no element matched the selector' }
+      return { ok: true, tag: value?.tag ?? '', text: value?.text ?? '', name: value?.name ?? '' }
+    },
+  }))
+
+  ctx.tools.register(defineTool({
+    name: 'browser_type',
+    description:
+      'Type text into an element (input, textarea, or contenteditable) in the agent\'s current work tab in the user\'s browser, identified by a CSS selector. Replaces any existing value and dispatches input + change events so page scripts react. The element pulses visibly, so the user sees where the text lands. Returns the element\'s tag and a human-readable name, or an error when no element matches the selector.',
+    parameters: {
+      selector: { type: 'string', required: true, description: 'CSS selector of the element to type into, e.g. "#search" or "input[name=email]".' },
+      text: { type: 'string', required: true, description: 'The text to type (replaces the element\'s current value).' },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          ok: { type: 'boolean', required: true },
+          tag: { type: 'string' },
+          name: { type: 'string' },
+          error: { type: 'string' },
+        },
+      },
+      render: (_args, value) => [
+        { type: 'text', text: value.ok ? `Typed into ${value.name ?? value.tag ?? 'an element'}` : `type failed: ${value.error ?? 'unknown error'}` },
+      ],
+    },
+    async execute(args, exec) {
+      if (exec.signal.aborted) throw new Error('cancelled')
+      const round = await act({ action: 'type', selector: args.selector, text: args.text })
+      if (!round.ok) return { ok: false, error: round.error }
+      const value = round.result as BrowserElementResult | undefined
+      if (value?.ok === false) return { ok: false, error: value.error ?? 'no element matched the selector' }
+      return { ok: true, tag: value?.tag ?? '', name: value?.name ?? '' }
     },
   }))
 }
