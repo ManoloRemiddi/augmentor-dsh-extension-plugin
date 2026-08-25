@@ -54,6 +54,13 @@ const state = {
   // The DSH app's home directory (host.describe) — the working directory for
   // the session we create on first prompt.
   homeDir: null,
+  // M3 chat lifecycle (from the plugin's handshake, folded into initialize):
+  // the dedicated chat directory every new session is created in (Save can
+  // attach such a session to its workspace), the running DSH app's base URL
+  // (Open-in-DSH button), and the sessions already saved there (badge).
+  chatCwd: null,
+  endpoint: null,
+  saved: new Set(),
   // Session entries the panel renders (events + port/prompt/handshake/status).
   // Big on purpose: a fresh panel load replays this as the whole chat, so it
   // must hold a full working session (~2 entries per streamed chunk).
@@ -233,6 +240,11 @@ function ensurePort() {
         model: sel.model,
       })
       state.homeDir = result?.serverInfo?.home ?? null
+      // M3: the plugin's chat-lifecycle state rides in serverInfo.augmentor;
+      // the pipe's endpoint (serverInfo.endpoint) feeds Open-in-DSH.
+      state.chatCwd = result?.serverInfo?.augmentor?.chatCwd ?? null
+      state.endpoint = result?.serverInfo?.endpoint ?? null
+      state.saved = new Set(result?.serverInfo?.augmentor?.saved ?? [])
       // M2: resume the conversation across the SW restart — if the DSH
       // session we stored still exists on the server, replay its events into
       // the log so a fresh panel re-renders the chat on load; if it is gone,
@@ -902,8 +914,41 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       sessionId: SESSION_ID,
       model: state.selection,
       models: state.catalog,
+      // M3: chat-lifecycle state for the panel (Open-in-DSH + Save badge).
+      endpoint: state.endpoint,
+      chatCwd: state.chatCwd,
+      saved: [...state.saved],
     })
     return
+  }
+  if (msg?.type === 'save' || msg?.type === 'unsave') {
+    // M3: one-tap Save / Unsave. The pipe forwards to the plugin, which
+    // attaches (or detaches) THIS chat's DSH session to the workspace over
+    // the dedicated chat dir. The saved set is refreshed from the plugin
+    // (authoritative) so the badge never lies.
+    const saving = msg.type === 'save'
+    if (state.phase !== 'ready' || !sessionReady) {
+      sendResponse({ ok: false, error: saving ? 'this chat is not on the server yet — send a message first' : 'not connected' })
+      return
+    }
+    ;(async () => {
+      try {
+        const res = await request(saving ? 'augmentor/save' : 'augmentor/unsave', { sessionId: SESSION_ID })
+        if (!res?.ok) throw new Error(res?.error ?? (saving ? 'save failed' : 'unsave failed'))
+        try {
+          const st = await request('augmentor/state', {})
+          state.saved = new Set(st?.saved ?? [])
+        } catch {
+          // state refresh failed: fall back to the optimistic view
+          if (saving) state.saved.add(SESSION_ID)
+          else state.saved.delete(SESSION_ID)
+        }
+        sendResponse({ ok: true, saved: state.saved.has(SESSION_ID), sessionId: SESSION_ID, savedSet: [...state.saved] })
+      } catch (e) {
+        sendResponse({ ok: false, error: e.message })
+      }
+    })()
+    return true // async
   }
   if (msg?.type === 'prompt') {
     // M2: the DSH app IS the runtime — our chat is a real DSH session,
@@ -937,9 +982,14 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
             if (exists === false) clearStoredSessionId()
             SESSION_ID = `augmentor-${crypto.randomUUID().slice(0, 8)}`
             saveSessionId(SESSION_ID)
+            // M3: create the session IN the plugin's dedicated chat dir —
+            // workspace attachSession validates the header cwd against the
+            // workspace path, so a chat is saveable only if it was created
+            // here. Fall back to the app home when the plugin is not up.
+            const cwd = state.chatCwd ?? state.homeDir
             await request('session.create', {
               sessionId: SESSION_ID,
-              ...(state.homeDir ? { cwd: state.homeDir } : {}),
+              ...(cwd ? { cwd } : {}),
             })
             broadcast(log('handshake', { event: 'session-created', sessionId: SESSION_ID }))
           }
@@ -1001,6 +1051,12 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       running: state.running,
       model: state.selection,
       models: state.catalog,
+      // M3: the 2 s poll keeps the panel's Save badge + Open-in-DSH button
+      // current without any dedicated round trip.
+      sessionId: SESSION_ID,
+      endpoint: state.endpoint,
+      chatCwd: state.chatCwd,
+      saved: [...state.saved],
     })
     return
   }

@@ -11,10 +11,19 @@
  *
  * Surface (loopback-reachable; reachability is the fence's job, not this
  * plugin's):
- *   GET <apiPath>   handshake JSON: {name, protocol, version, wsPath, pipes, time}
+ *   GET <apiPath>   handshake JSON: {name, protocol, version, wsPath, pipes,
+ *                   chatCwd, saved, time}
  *   WS  <wsPath>    pipe channel (token-gated, see below); frame vocabulary below
  *   tools browser_tabs_list / browser_navigate / browser_snapshot /
  *         browser_click / browser_type (the M2 browser tool set)
+ *
+ * M3 chat lifecycle (proposal §5): the extension's chats live as real DSH
+ * sessions with cwd pinned to the dedicated directory (config.chatDir,
+ * default ~/Augmentor — created at boot). Save = idempotent
+ * workspaceRegistry.create(chatDir) + attachSession; Unsave = detachSession.
+ * A housekeeping sweep (boot + interval) archives extension sessions older
+ * than retentionDays that no workspace attaches; with deleteAfterDays > 0 it
+ * also deletes their raw artifacts (off by default).
  *
  * Token gate: the action channel is the one surface that drives the user's
  * browser, so it takes a token on the upgrade URL (?token=…). Precedence:
@@ -26,17 +35,20 @@
  * Pipe frame vocabulary (one JSON object per WS message):
  *   pipe → plugin: {type: 'hello', name, version}
  *                   {type: 'request', id, method: 'browser/execute', params}
+ *                   {type: 'request', id, method: 'augmentor/save'|'augmentor/unsave'|
+ *                                        'augmentor/state', params}
  *   plugin → pipe: {type: 'welcome', name, version}
  *                  {type: 'reply', id, result}
  *                  {type: 'reply', id, error: {message}}
- * Requests are broadcast to every connected pipe; the first reply settles
- * the waiter, later replies are dropped as late.
+ * browser/execute requests are broadcast to every connected pipe; the first
+ * reply settles the waiter, later replies are dropped as late. augmentor/*
+ * requests are answered by the plugin itself (no browser involved).
  */
 import type { Context } from '@deepseek-ai/cordis'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { Duplex } from 'node:stream'
 import { randomBytes, randomUUID } from 'node:crypto'
-import { readFileSync, writeFileSync } from 'node:fs'
+import { mkdirSync, realpathSync, rmSync, readFileSync, writeFileSync } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import z from '@deepseek-ai/schemastery'
@@ -45,7 +57,11 @@ import { WebSocketServer } from 'ws'
 import type { WebSocket } from 'ws'
 
 export const name = 'dsh-augmentor'
-export const inject = ['tools']
+// 'workspaceRegistry' and 'sessionPersistence' are declared so the loader
+// starts them (and their own dependencies) before this plugin's apply runs —
+// the M3 save/housekeeping paths touch them synchronously at request time,
+// and the registry's startup table must be warm by then.
+export const inject = ['tools', 'workspaceRegistry', 'sessionPersistence']
 
 export interface Config {
   /** Exact HTTP handshake route under /api. */
@@ -59,6 +75,31 @@ export interface Config {
    * secret file $DSH_HOME/augmentor-ws-token (created on first boot).
    */
   wsToken: string
+  /**
+   * Dedicated directory for Augmentor chats (proposal §5.1–§5.2). Every
+   * extension session is created with cwd = this directory so Save can
+   * attach it to the workspace over it. `~` expands to the user's home.
+   * Created (mkdir -p) and canonicalized (realpath) at boot; a directory
+   * that cannot be prepared fails the plugin loudly.
+   */
+  chatDir: string
+  /** Title of the workspace the Save button attaches chats to. */
+  workspaceTitle: string
+  /**
+   * Housekeeping sweep: extension sessions in chatDir that no workspace
+   * attaches and that are older than this many days get archived.
+   */
+  retentionDays: number
+  /**
+   * Housekeeping sweep: archived extension sessions older than this many
+   * days also have their raw session artifacts deleted. 0 (default) =
+   * never delete — archiving only, as decided in proposal §5.4.
+   */
+  deleteAfterDays: number
+  /** Interval between housekeeping sweeps, milliseconds. */
+  sweepEveryMs: number
+  /** Delay after boot before the first housekeeping sweep, milliseconds. */
+  sweepFirstDelayMs: number
 }
 
 export const Config: z<Config> = z.object({
@@ -66,6 +107,12 @@ export const Config: z<Config> = z.object({
   wsPath: z.string().default('/api/augmentor/ws'),
   commandTimeoutMs: z.number().default(30000),
   wsToken: z.string().default(''),
+  chatDir: z.string().default('~/Augmentor'),
+  workspaceTitle: z.string().default('Augmentor Chat'),
+  retentionDays: z.number().default(14),
+  deleteAfterDays: z.number().default(0),
+  sweepEveryMs: z.number().default(60 * 60 * 1000),
+  sweepFirstDelayMs: z.number().default(60 * 1000),
 })
 
 /** Per-machine action-channel secret: created 0600 on first boot, same path on both sides. */
@@ -143,6 +190,49 @@ interface WebServerLike {
   registerUpgrade(route: { path: string; handler: (req: IncomingMessage, socket: Duplex, head: Buffer) => void }): () => void
 }
 
+// Structural views of two host services used by the M3 chat lifecycle. The
+// plugin is a third-party bundle (main: src/index.ts, no @deepseek-ai/dsh-*
+// workspace dependency), so it sees them through plain shapes and a
+// runtime `ctx.get` lookup — the loader's inject declaration above still
+// guarantees they are started first.
+
+/** One workspace row, as the M3 paths need it (workspace/workspace/src/entity.ts). */
+interface WorkspaceLike {
+  id: string
+  title: string
+  path: string
+  /** Session ids attached to this workspace (cwd-index filtered, newest first). */
+  readonly sessionIds: readonly string[]
+  attachSession(sessionId: string): Promise<void>
+  detachSession(sessionId: string): Promise<void>
+}
+
+/** The workspace registry surface the plugin drives (index.ts). */
+interface WorkspaceRegistryLike {
+  /** Idempotent per canonical path; rejects if the directory does not exist. */
+  create(path: string, title?: string): Promise<WorkspaceLike>
+  resolveByPath(path: string): Promise<WorkspaceLike | undefined>
+  list(): WorkspaceLike[]
+  archiveSession(sessionId: string): Promise<void>
+  readonly archivedSessionIds: readonly string[]
+}
+
+/** One session header row (core/session SessionHeader, persistence list shape). */
+interface SessionHeaderLike {
+  id: string
+  /** Absolute cwd the session was created in (may be undefined). */
+  cwd?: string
+  /** Epoch ms. */
+  createdAt: number
+}
+
+/** The session persistence surface the sweep needs (session-persistence). */
+interface SessionPersistenceLike {
+  list(): Promise<readonly SessionHeaderLike[]>
+  /** Absolute path of the raw artifact for a header, or undefined when the backend keeps nothing deletable. */
+  locate(meta: SessionHeaderLike): { path: string } | undefined
+}
+
 export function apply(ctx: Context, config: Config) {
   const pipes = new Set<WebSocket>()
   const pending = new Map<string, { settle: (value: BrowserRoundTrip) => void }>()
@@ -178,15 +268,148 @@ export function apply(ctx: Context, config: Config) {
     })
   }
 
+  // ----------------------------------------------------- M3 chat lifecycle
+  // The extension's chats are real DSH sessions with cwd pinned to a
+  // dedicated directory. Save attaches the session to the workspace over
+  // that directory; the sweep archives stale ones no workspace claims.
+
+  /**
+   * Prepare the chat directory: expand ~, mkdir -p, canonicalize. A
+   * directory that cannot be prepared is a misconfiguration — fail the
+   * plugin loudly (docs/user/develop/basic/config.md: "Fail loudly on
+   * invalid configuration").
+   */
+  const chatDirRaw = config.chatDir.startsWith('~/')
+    ? path.join(os.homedir(), config.chatDir.slice(2))
+    : config.chatDir
+  let chatDir: string
+  try {
+    mkdirSync(chatDirRaw, { recursive: true })
+    chatDir = realpathSync(chatDirRaw)
+  } catch (e) {
+    throw new Error(`dsh-augmentor: cannot prepare chat dir ${config.chatDir} (${(e as Error).message})`)
+  }
+  console.log('[dsh-augmentor] chat dir ready: %s (workspace: %s)', chatDir, config.workspaceTitle)
+
+  // Declared in inject, so both services are started before apply runs.
+  const registry = ctx.get('workspaceRegistry') as unknown as WorkspaceRegistryLike
+  const persistence = ctx.get('sessionPersistence') as unknown as SessionPersistenceLike
+
+  /** The workspace the Save button attaches chats to; created idempotently on demand. */
+  const ensureWorkspace = () => registry.create(chatDir, config.workspaceTitle)
+  /** The existing workspace over the chat dir, if any (resolveByPath is async). */
+  const chatWorkspace = () => registry.resolveByPath(chatDir)
+
+  /** Answer the extension's lifecycle requests that ride in as pipe frames. */
+  async function handlePipeRequest(frame: { id: string; method: string; params?: Record<string, unknown> }): Promise<void> {
+    const id = frame.id
+    const reply = (out: Record<string, unknown>) => sendToPipes({ type: 'reply', id, result: out })
+    try {
+      const sessionId = String(frame.params?.sessionId ?? '')
+      if (frame.method === 'augmentor/save') {
+        if (!sessionId) throw new Error('save: missing sessionId')
+        const ws = await ensureWorkspace()
+        await ws.attachSession(sessionId) // validates the session's cwd header against chatDir
+        reply({ ok: true, saved: true, sessionId, workspace: { id: ws.id, title: ws.title, path: ws.path } })
+      } else if (frame.method === 'augmentor/unsave') {
+        if (!sessionId) throw new Error('unsave: missing sessionId')
+        const ws = await chatWorkspace()
+        if (ws) await ws.detachSession(sessionId) // idempotent
+        reply({ ok: true, saved: false, sessionId, workspace: ws ? { id: ws.id, title: ws.title, path: ws.path } : null })
+      } else if (frame.method === 'augmentor/state') {
+        const ws = await chatWorkspace()
+        reply({ ok: true, saved: [...(ws?.sessionIds ?? [])], archived: [...registry.archivedSessionIds] })
+      } else {
+        reply({ ok: false, error: `unknown augmentor method: ${frame.method}` })
+      }
+    } catch (e) {
+      const message = (e as Error).message ?? String(e)
+      // attachSession throws when the session's cwd header is not chatDir —
+      // that happens for chats created before the cwd pinning existed.
+      const friendly = /cwd/i.test(message)
+        ? `${message} — this chat was created outside ${chatDir}; start a new chat to save it`
+        : message
+      reply({ ok: false, error: friendly })
+    }
+  }
+
+  // ------------------------------------------------------ housekeeping
+  const DAY_MS = 24 * 60 * 60 * 1000
+  async function sweep(): Promise<void> {
+    try {
+      const headers = await persistence.list()
+      const archived = new Set<string>(registry.archivedSessionIds)
+      const claimed = new Set<string>()
+      for (const ws of registry.list()) for (const sid of ws.sessionIds) claimed.add(sid)
+      const now = Date.now()
+      const retentionMs = config.retentionDays * DAY_MS
+      const deleteMs = config.deleteAfterDays > 0 ? config.deleteAfterDays * DAY_MS : Infinity
+      let archivedNow = 0
+      let deleted = 0
+      for (const h of headers) {
+        if (typeof h.cwd !== 'string') continue
+        let canon: string
+        try {
+          canon = realpathSync(h.cwd)
+        } catch {
+          continue // header cwd vanished from disk: nothing to claim, leave it
+        }
+        if (canon !== chatDir) continue // only extension chats live here
+        if (archived.has(h.id) || claimed.has(h.id)) continue
+        if (now - h.createdAt < retentionMs) continue
+        await registry.archiveSession(h.id)
+        archivedNow++
+        if (now - h.createdAt > deleteMs) {
+          const loc = persistence.locate(h)
+          if (loc) {
+            try {
+              rmSync(loc.path, { recursive: true, force: true })
+              deleted++
+            } catch (e) {
+              console.warn('[dsh-augmentor] housekeeping: could not delete artifact for %s (%s)', h.id, (e as Error).message)
+            }
+          }
+        }
+      }
+      if (archivedNow || deleted) console.log('[dsh-augmentor] housekeeping sweep: archived %d, deleted %d', archivedNow, deleted)
+    } catch (e) {
+      // The sweep is best-effort housekeeping; one failed pass logs and the
+      // next interval retries. A throw here must never kill the plugin.
+      console.warn('[dsh-augmentor] housekeeping sweep failed: %s', (e as Error).message)
+    }
+  }
+  {
+    // Boot + interval timers. ctx.effect(setup) runs setup NOW and disposes
+    // whatever it RETURNS with the plugin fiber (HMR replacement or profile
+    // teardown) — so the cleanup must be the returned function, exactly like
+    // the action-channel route disposers below. A replaced instance therefore
+    // never keeps sweeping.
+    let interval: ReturnType<typeof setInterval> | undefined
+    const first = setTimeout(() => {
+      void sweep()
+      interval = setInterval(() => void sweep(), config.sweepEveryMs)
+    }, config.sweepFirstDelayMs)
+    ctx.effect(() => () => {
+      clearTimeout(first)
+      if (interval) clearInterval(interval)
+    }, 'dsh-augmentor: housekeeping sweep')
+  }
+
   wss.on('connection', (pipe: WebSocket) => {
     pipes.add(pipe)
     pipe.send(JSON.stringify({ type: 'welcome', name: 'dsh-augmentor', protocol: PROTOCOL, version: VERSION }))
     pipe.on('message', (data) => {
-      let frame: { type?: string; id?: string; result?: unknown; error?: { message?: string } }
+      let frame: { type?: string; id?: string; method?: string; params?: Record<string, unknown>; result?: unknown; error?: { message?: string } }
       try {
         frame = JSON.parse(String(data))
       } catch {
         return // non-JSON frames are outside the pipe vocabulary
+      }
+      if (frame.type === 'request' && frame.id !== undefined && frame.method) {
+        // The extension's lifecycle requests (save/unsave/state) arrive as
+        // forwarded pipe frames; the plugin answers them itself.
+        void handlePipeRequest(frame)
+        return
       }
       if (frame.type !== 'reply' || frame.id === undefined) return
       const waiter = pending.get(frame.id)
@@ -222,11 +445,22 @@ export function apply(ctx: Context, config: Config) {
       const disposeRoute = webServer.register({
         kind: 'exact',
         path: config.apiPath,
-        handler(req, res) {
+        handler: async (req, res) => {
           if (req.method !== 'GET' && req.method !== 'HEAD') {
             res.writeHead(405, { 'content-type': 'text/plain; charset=utf-8' })
             res.end('method not allowed')
             return
+          }
+          // The handshake carries the chat-lifecycle state: the pipe folds
+          // it into its `initialize` result so the extension learns the
+          // pinned cwd and which chats are already saved. resolveByPath
+          // reads the registry's startup table — try-guarded so a not-yet
+          // warm registry degrades to an empty saved list instead of 500s.
+          let saved: string[] = []
+          try {
+            saved = [...((await registry.resolveByPath(chatDir))?.sessionIds ?? [])]
+          } catch {
+            /* registry table not warm yet */
           }
           const body = JSON.stringify({
             name: 'dsh-augmentor',
@@ -235,6 +469,8 @@ export function apply(ctx: Context, config: Config) {
             wsPath: config.wsPath,
             wsTokenRequired: Boolean(resolved.token),
             wsTokenSource: resolved.source,
+            chatCwd: chatDir,
+            saved,
             pipes: pipes.size,
             time: Date.now(),
           })

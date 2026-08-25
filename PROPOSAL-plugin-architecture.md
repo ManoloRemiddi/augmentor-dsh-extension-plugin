@@ -572,6 +572,40 @@ low-frequency sweep (boot + hourly):
   (§5) (model picker done early with M2 — `session.selectModel` on the live session), **Open-in-DSH button**, approval/question UI, keep-alive tuning, settings
   (host-side namespace + panel-owned UI — in-page GUI card deferred, §10; incl. dedicated
   directory + retention), endpoint options.
+  **Slice 1 done (2026-08-25): Save/Unsave + Augmentor Chat workspace + housekeeping +
+  Open-in-DSH (Option A) + cwd pinning.** Wire: panel → SW `save`/`unsave` → pipe
+  (`PLUGIN_METHODS` forwarded over the token-gated plugin WS, 30 s waiter) → plugin
+  `augmentor/save|unsave|state` → workspace `attachSession`/`detachSession` on the
+  idempotent `registry.create(chatDir, 'Augmentor Chat')`; handshake carries `chatCwd` +
+  `saved` so the SW creates sessions **with `cwd = chatDir`** (mandatory: the entity
+  validates `realpath(cwd) === workspace path` — mismatched sessions get a friendly
+  "start a new chat" error instead of a raw throw). Sweep (boot + interval, config
+  `retentionDays` 14 / `deleteAfterDays` 0 = archive-only default / `sweepEveryMs` /
+  `sweepFirstDelayMs`) archives stale unattached chat-dir sessions and optionally
+  `rmSync`s their located artifacts; timer disposers ride the plugin fiber. Boot test
+  extended to the full lifecycle (`session.create` → rename to materialize the artifact →
+  save → `workspace.list {items}` shows the attach → unsave → state → sweep archives) —
+  **ALL PASS** on a fresh isolated boot. Footnotes from acceptance: **(1) `ctx.effect`
+  semantics** — `ctx.effect(setup)` runs `setup` *immediately* and disposes what it
+  *returns*; the first sweep-timer version put the `clearTimeout` inside the setup body,
+  so the boot timer cleared itself at apply and the sweep never ran (zero log lines —
+  found by instrumentation, not by test assertion, because a silent sweep is not a test
+  failure). **(2) `workspaceRegistry.resolveByPath` is async** — a sync call site makes
+  the "workspace" a Promise and `detachSession` is `undefined`. **(3) boot-test
+  isolation**: `storages` must be **copied**, never symlinked — the workspace table is
+  written on attach/sweep, and a symlinked test leaked two `Augmentor Chat` workspaces
+  (same session id accounted twice) into the user's real `~/.dsh/storages/workspace.json`;
+  `validateStoredState` then refuses boot on double-accounting (cleaned with backup;
+  `workspace.json.bak-m3-cleanup`). **(4) zero-event sessions have no persistence
+  artifact** — the sweep lists artifacts, so a `session.create`d chat is invisible until
+  its first event (true for real chats before the user's first message; the test
+  materializes via `session.rename`, which appends a `session/title` event with no LLM).
+  **Deploy = config hot-replace, no restart**: adding a key to the live row in
+  `~/.dsh/cordis.patch.yml` (`chatDir: '~/Augmentor'`) is the documented hot-replace
+  trigger — the running server unloads the M2 instance and loads the M3 source in place;
+  the pipe's plugin-WS reconnect picks the channel back up, and the extension reload
+  ships the new SW/panel. Live acceptance (Save tap → badge → app workspace) pending the
+  user's extension reload.
 - **M4 — hardening & packaging**: reconnect/resync audit, error surfaces, version gate,
   install scripts (plugin insert helper + extension zip), README rewrite, decision on
   publishing the plugin upstream vs locally installed.

@@ -206,6 +206,7 @@ async function refresh() {
     const res = await send('log', { sinceSeq: ui.lastSeq })
     if (!res) return
     ui.setState({ phase: res.phase, error: res.error, running: viewSessionId ? false : res.running })
+    if (!viewSessionId) updateSaveBadge(res)
     if (viewSessionId) return // DSH view: chrome only, no sidecar entries
     applyModelInfo(res)
     ui.applyLog(res.log)
@@ -562,6 +563,41 @@ function setViewComposer(enabled) {
   document.getElementById('input').disabled = !enabled
   document.getElementById('send').disabled = !enabled
 }
+
+// ── M3 chat lifecycle: Save badge + Open-in-DSH ─────────────────────────────
+// The SW's 2 s poll (refresh → 'log') carries the chat-lifecycle state: the
+// running session id, the running DSH app's base URL, and the set of sessions
+// saved to the Augmentor Chat workspace. The badge mirrors whether THIS chat
+// is in that set; the button toggles save/unsave.
+let m3SessionId = null
+let m3Endpoint = null
+let m3Saved = new Set()
+const saveBtn = document.getElementById('save')
+function updateSaveBadge(res) {
+  if (typeof res.sessionId === 'string') m3SessionId = res.sessionId
+  if (typeof res.endpoint === 'string') m3Endpoint = res.endpoint
+  if (Array.isArray(res.saved)) m3Saved = new Set(res.saved)
+  const saved = m3SessionId !== null && m3Saved.has(m3SessionId)
+  saveBtn.classList.toggle('saved', saved)
+  saveBtn.textContent = saved ? '✓ Saved' : '☆ Save'
+  saveBtn.title = saved
+    ? 'This chat is saved in DSH under Augmentor Chat — tap to unsave'
+    : 'Save this chat to the Augmentor Chat workspace in DSH (tap again to unsave)'
+}
+saveBtn.addEventListener('click', async () => {
+  const res = await send(m3Saved.has(m3SessionId) ? 'unsave' : 'save')
+  if (res?.ok === false) {
+    ui.sendFail(res.error)
+    return
+  }
+  if (res?.savedSet) m3Saved = new Set(res.savedSet)
+  updateSaveBadge({ sessionId: m3SessionId, endpoint: m3Endpoint, saved: [...m3Saved] })
+})
+document.getElementById('openindsh').addEventListener('click', () => {
+  // Option A (proposal §5.3): plain app-open, no deep link — a new tab at the
+  // running DSH app. The saved chat is visible there under Augmentor Chat.
+  if (m3Endpoint) window.open(m3Endpoint.replace(/\/$/, '') + '/', '_blank', 'noopener')
+})
 
 // "＋ New chat": the SW mints a fresh sessionId (the runtime lazily creates
 // the agent+session pair on the next prompt) and clears its log. Also exits

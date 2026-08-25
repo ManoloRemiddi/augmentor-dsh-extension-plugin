@@ -73,6 +73,9 @@
   .hbtn:hover { background: var(--layer2); color: var(--text); }
   #connect { background: var(--brand); border: none; color: #fff; }
   #connect:hover { background: var(--brand); filter: brightness(1.1); }
+  /* M3: Save badge — a saved chat reads as "done", in the accent, not a hover. */
+  #save.saved { color: var(--accent, var(--brand)); border-color: var(--accent, var(--brand)); }
+  #save.saved:hover { background: var(--layer2); }
   .hicon { flex: none; display: inline-flex; align-items: center; justify-content: center;
     width: 26px; height: 26px; border: none; border-radius: 6px; background: transparent;
     color: var(--text2); cursor: pointer; }
@@ -320,6 +323,8 @@
       <span class="hue-chip"></span>
     </button>
     <button id="newchat" class="hbtn" title="Start a new session">＋ New chat</button>
+    <button id="save" class="hbtn" title="Save this chat to the Augmentor Chat workspace in DSH (tap again to unsave)">☆ Save</button>
+    <button id="openindsh" class="hbtn" title="Open the running DSH app in a new tab">DSH ↗</button>
     <button id="connect" class="hbtn">Connect</button>
     <button id="sessions" class="hbtn" title="Browse DSH app sessions (M1)">≣ Sessions</button>
   </header>

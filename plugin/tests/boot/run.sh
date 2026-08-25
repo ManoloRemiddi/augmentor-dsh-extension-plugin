@@ -5,10 +5,16 @@
 # server, different port, no prompts sent) with an overlay patch that mounts
 # this plugin from source under an explicit action-channel token, then asserts
 # the user-visible surface over HTTP/WS:
-#   1. GET  /api/augmentor      -> 200 handshake, token reported (config source)
+#   1. GET  /api/augmentor      -> 200 handshake, token reported (config source),
+#                                  chatCwd reported + directory created
 #   2. POST /api/augmentor      -> 405 (GET-only route)
 #   3. WS   wrong token         -> refused (no welcome frame)
 #   4. WS   right token         -> welcome frame
+#   5. M3 lifecycle: session.create (cwd = chat dir) -> augmentor/save ->
+#      workspace over chat dir exists with the session attached ->
+#      augmentor/unsave -> detached
+#   6. M3 housekeeping: with sub-second retention the sweep archives the stale
+#      unattached session (verified via augmentor/state's archived list)
 #
 # Isolation: the test runs under a throwaway DSH_HOME. The user's home patch
 # (`cordis.patch.yml`) is deliberately NOT present, because it already inserts
@@ -31,13 +37,26 @@ trap 'kill $DSH_PID 2>/dev/null; rm -rf "$TMPDIR_T"' EXIT INT TERM
 
 ISOLATED_HOME="$TMPDIR_T/home"
 mkdir -p "$ISOLATED_HOME/sessions"
-for p in profiles settings.yaml .anonymous-user-id llm-deepseek storages .agent-presets attachments; do
+# M3: the dedicated chat dir lives INSIDE the isolated home (never the user's
+# real ~/Augmentor), so Save/attach and the sweep touch only throwaway state.
+CHATDIR="$ISOLATED_HOME/chat"
+mkdir -p "$CHATDIR"
+for p in profiles settings.yaml .anonymous-user-id llm-deepseek .agent-presets attachments; do
   [ -e "$REAL_HOME/$p" ] && ln -s "$REAL_HOME/$p" "$ISOLATED_HOME/$p"
 done
+# storages: COPY, never symlink (M3). The workspace table is written on
+# Save/attach/sweep; a symlink would leak test writes into the user's real
+# registry (a session accounted by two test workspaces breaks the workspace
+# domain's startup validation and would kill the user's next boot). The copy
+# gives the test a realistic initial state while confining every write to
+# the throwaway home.
+[ -e "$REAL_HOME/storages" ] && cp -r "$REAL_HOME/storages" "$ISOLATED_HOME/storages"
 # No cordis.patch.yml on purpose (see isolation note above).
 
 OVERLAY="$TMPDIR_T/overlay.yml"
-sed "s|^    name: AUGMENTOR_ENTRY$|    name: '$ENTRY'|" "$SCRIPT_DIR/overlay-template.yml" > "$OVERLAY"
+sed -e "s|^    name: AUGMENTOR_ENTRY$|    name: '$ENTRY'|" \
+    -e "s|^      chatDir: AUGMENTOR_CHATDIR$|      chatDir: '$CHATDIR'|" \
+    "$SCRIPT_DIR/overlay-template.yml" > "$OVERLAY"
 
 # Pick a free port.
 PORT=$("$NODE_BIN" -e "const s=require('net').createServer().listen(0,()=>{console.log(s.address().port);s.close()})")
@@ -73,6 +92,8 @@ BODY=$(printf '%s' "$H" | head -n -1)
 check "handshake status" 200 "$CODE"
 printf '%s' "$BODY" | grep -q '"wsTokenRequired":true' && check "handshake reports token required" ok ok || { log "FAIL: handshake token flag: $BODY"; FAIL=1; }
 printf '%s' "$BODY" | grep -q '"wsTokenSource":"config"' && check "token source is config" ok ok || { log "FAIL: token source: $BODY"; FAIL=1; }
+# M3: the handshake carries the pinned chat dir (the SW creates sessions in it).
+printf '%s' "$BODY" | grep -q "\"chatCwd\":\"$CHATDIR\"" && check "handshake reports chatCwd" ok ok || { log "FAIL: handshake chatCwd: $BODY"; FAIL=1; }
 
 # 2. non-GET on the route -> 405
 check "non-GET is 405" 405 "$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/api/augmentor")"
@@ -117,5 +138,91 @@ if [ -f "$REAL_HOME/augmentor-ws-token" ]; then
 else
   log "PASS: no per-machine token file in user home (config branch used)"
 fi
+
+# 5+6. M3 chat lifecycle + housekeeping, over the real composition:
+# session.create (cwd = chat dir) -> save (workspace attach) -> unsave ->
+# the fast sweep archives the stale unattached session (sub-second retention
+# in the overlay). Runs as one node leg against HTTP + the token-gated WS.
+M3_OUT=$("$NODE_BIN" - "$BASE" "$PLUGIN_DIR" "$CHATDIR" <<'EOF'
+const [base, pluginDir, chatDir] = process.argv.slice(2)
+const WebSocket = require(require('path').join(pluginDir, 'node_modules', 'ws'))
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
+async function dsh(method, payload) {
+  const rpcId = `m3test-${Math.random().toString(36).slice(2)}`
+  const res = await fetch(`${base}/api/${method}`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ type: 'client-request', rpcId, method, payload }),
+  })
+  const body = await res.json()
+  if (!res.ok || body?.type !== 'server-response' || !body.result?.ok) {
+    throw new Error(`${method}: ${JSON.stringify(body?.result?.error ?? body)}`)
+  }
+  return body.result.value
+}
+async function main() {
+  const SID = 'boot-m3-test'
+  // The extension's own contract: sessions are created IN the chat dir.
+  await dsh('session.create', { sessionId: SID, cwd: chatDir })
+  // A created-but-never-prompted session has NO persistence artifact, so the
+  // sweep (which lists artifacts) cannot see it — true for real extension
+  // chats only before their first message. rename appends a session/title
+  // event without any LLM, materializing the artifact the way the user's
+  // first message would, so the housekeeping leg has a real header to find.
+  await dsh('session.rename', { sessionId: SID, title: 'm3 boot test' })
+  const ws = new WebSocket(`${base.replace(/^http/, 'ws')}/api/augmentor/ws?token=boot-test-token-0123456789abcdef`)
+  await new Promise((res, rej) => { ws.on('open', res); ws.on('error', (e) => rej(e)) })
+  const waiters = new Map()
+  ws.on('message', (d) => {
+    const m = JSON.parse(d.toString())
+    if (m.type === 'reply' && waiters.has(m.id)) { const w = waiters.get(m.id); waiters.delete(m.id); w(m) }
+  })
+  const call = (id, method, params) => new Promise((resolve, reject) => {
+    const to = setTimeout(() => reject(new Error(`${method} timed out`)), 8000)
+    waiters.set(id, (m) => { clearTimeout(to); resolve(m) })
+    ws.send(JSON.stringify({ type: 'request', id, method, params }))
+  })
+  const fail = (name, got) => { console.log(`M3FAIL: ${name} ${JSON.stringify(got)}`); process.exit(1) }
+  // save: workspace over the chat dir + session attached
+  let r = await call('m3-save', 'augmentor/save', { sessionId: SID })
+  if (r.result?.ok !== true || r.result?.saved !== true) fail('save reply', r)
+  console.log('M3PASS: save attaches the session (workspace over chat dir)')
+  // workspace.list value: { items: WorkspaceView[], archivedSessionIds }
+  let rows = (await dsh('workspace.list', {})).items ?? []
+  let row = rows.find((w) => w.path === chatDir)
+  if (!row || row.title !== 'Augmentor Chat') fail('workspace row', rows)
+  if (!(row.sessionIds ?? []).includes(SID)) fail('workspace sessionIds', row)
+  console.log('M3PASS: workspace.list shows Augmentor Chat with the session attached')
+  // unsave: detached, workspace survives
+  r = await call('m3-unsave', 'augmentor/unsave', { sessionId: SID })
+  if (r.result?.ok !== true || r.result?.saved !== false) fail('unsave reply', r)
+  rows = (await dsh('workspace.list', {})).items ?? []
+  row = rows.find((w) => w.path === chatDir)
+  if (!row) fail('workspace after unsave', rows)
+  if ((row.sessionIds ?? []).includes(SID)) fail('session still attached', row)
+  console.log('M3PASS: unsave detaches the session (workspace survives)')
+  r = await call('m3-state', 'augmentor/state', {})
+  if (r.result?.ok !== true || (r.result?.saved ?? []).includes(SID)) fail('state after unsave', r)
+  console.log('M3PASS: augmentor/state reflects the detach')
+  // housekeeping: retention ≈ 0.9 s, sweep every 0.5 s — poll state until the
+  // stale unattached session lands in the archived list (≤ 20 s).
+  let archived = false
+  for (let i = 0; i < 40 && !archived; i++) {
+    await sleep(500)
+    const st = await call(`m3-wait-${i}`, 'augmentor/state', {})
+    archived = (st.result?.archived ?? []).includes(SID)
+  }
+  if (!archived) fail('sweep did not archive the stale session', null)
+  console.log('M3PASS: housekeeping sweep archived the stale unattached session')
+  ws.close()
+  console.log('M3 RESULT: ok')
+}
+main().catch((e) => { console.log(`M3 RESULT: error (${e.message})`); process.exit(1) })
+EOF
+)
+printf '%s\n' "$M3_OUT" | grep '^M3PASS' | while IFS= read -r line; do log "${line#M3PASS: }"; done
+printf '%s\n' "$M3_OUT" | grep -q '^M3 RESULT: ok' \
+  && check "M3 chat lifecycle + housekeeping" ok ok \
+  || { log "FAIL: M3 lifecycle:"; printf '%s\n' "$M3_OUT"; FAIL=1; }
 
 [ "$FAIL" = 0 ] && { log "ALL PASS"; exit 0; } || { log "FAILURES PRESENT"; exit 1; }

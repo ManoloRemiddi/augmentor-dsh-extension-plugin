@@ -167,6 +167,10 @@ function sendToExt(obj) {
 // practice (different minters).
 const forwardedRpc = new Map() // rpcId → 'mux' | 'host'
 const pluginPending = new Map() // plugin id → true
+// Extension-originated lifecycle requests (augmentor/save|unsave|state)
+// forwarded to the plugin, waiting for its reply frame.
+const pluginReplyWaiters = new Map() // id → {resolve, reject, timer}
+const PLUGIN_TIMEOUT_MS = 30000
 
 async function routeExtReply(msg) {
   if (forwardedRpc.has(msg.id)) {
@@ -203,6 +207,17 @@ function openPluginWs() {
       return
     }
     trace({ kind: 'plugin', dir: 'plugin->pipe', msg: frame })
+    if (frame.type === 'reply' && frame.id !== undefined) {
+      // Answer to an augmentor/save|unsave|state request we forwarded.
+      const waiter = pluginReplyWaiters.get(frame.id)
+      if (waiter) {
+        pluginReplyWaiters.delete(frame.id)
+        clearTimeout(waiter.timer)
+        if (frame.error) waiter.reject(new Error(frame.error.message ?? JSON.stringify(frame.error)))
+        else waiter.resolve(frame.result)
+      }
+      return
+    }
     if (frame.type !== 'request' || frame.id === undefined) return // welcome etc.
     if (frame.method !== 'browser/execute') {
       pluginSend({ type: 'reply', id: frame.id, error: { message: `unsupported method: ${frame.method}` } })
@@ -304,6 +319,17 @@ const localMethods = {
   },
   async initialize() {
     const describe = await dsh('host.describe', {})
+    // Fold the plugin's handshake into serverInfo: the extension needs the
+    // pinned chat cwd (to create sessions in it) and the saved-session list
+    // (badge state) without a second wire round trip. Tolerate the plugin
+    // being down — the SW then falls back to the old cwd and shows no badge.
+    let augmentor = null
+    try {
+      const res = await fetch(`${DSH_BASE}/api/augmentor`, { signal: AbortSignal.timeout(3000) })
+      if (res.ok) augmentor = await res.json()
+    } catch {
+      /* plugin not up yet: live Save will fail with a readable error */
+    }
     return {
       serverInfo: {
         name: 'dsh-augmentor-pipe',
@@ -313,6 +339,10 @@ const localMethods = {
         cwd: describe.cwd,
         attachedSessions: describe.attachedSessions,
         transport: 'dsh-api-pipe',
+        // M3: the running DSH app's base URL (Open-in-DSH button) + the
+        // plugin's chat-lifecycle state.
+        endpoint: DSH_BASE,
+        augmentor,
       },
     }
   },
@@ -394,8 +424,27 @@ async function handleExtMessage(msg) {
     return
   }
   const id = msg.id
+  // M3: the chat-lifecycle methods are served by the PLUGIN over the action
+  // channel WS (it holds the workspaceRegistry), not by the /api surface —
+  // forward them there and await the plugin's reply frame.
+  const PLUGIN_METHODS = new Set(['augmentor/save', 'augmentor/unsave', 'augmentor/state'])
   try {
-    let value = localMethods[msg.method] ? await localMethods[msg.method](msg.params) : await dsh(msg.method, msg.params ?? {})
+    let value
+    if (PLUGIN_METHODS.has(msg.method)) {
+      if (!pluginWs || pluginWs.readyState !== WebSocket.OPEN) {
+        throw new Error('plugin channel not connected — the DSH app or the Augmentor plugin is not up')
+      }
+      value = await new Promise((resolve, reject) => {
+        const timer = setTimeout(() => {
+          pluginReplyWaiters.delete(id)
+          reject(new Error(`plugin request timed out after ${PLUGIN_TIMEOUT_MS}ms`))
+        }, PLUGIN_TIMEOUT_MS)
+        pluginReplyWaiters.set(id, { resolve, reject, timer })
+        pluginSend({ type: 'request', id, method: msg.method, params: msg.params ?? {} })
+      })
+    } else {
+      value = localMethods[msg.method] ? await localMethods[msg.method](msg.params) : await dsh(msg.method, msg.params ?? {})
+    }
     if (msg.method === 'session.history') {
       value = shapeHistory(value)
       if (value.truncatedEarlier) log('history shaped', { truncatedEarlier: value.truncatedEarlier })
