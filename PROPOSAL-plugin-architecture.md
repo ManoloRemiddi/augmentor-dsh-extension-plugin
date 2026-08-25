@@ -526,9 +526,23 @@ low-frequency sweep (boot + hourly):
   `session.prompt` + live turn rendering + Stop (`session.cancel`); all five browser tools
   round-tripping with the veil. *Exit: a full browser-agent conversation through the
   extension, driven by the user's own DSH model — disposable (Ungrouped) unless promoted.*
-- **M3 — awareness, sessions & parity**: model picker (`llm.models`, `session.selectModel`),
-  session picker/search, **Save button + Augmentor Chat workspace + housekeeping sweep**
-  (§5), **Open-in-DSH button**, approval/question UI, keep-alive tuning, settings
+  **Prompt loop done (2026-08-25).** The SW's chat identity doubles as the DSH session id
+  (`session.create {sessionId: <id>, cwd}` — the wire accepts any non-empty id, so live
+  downlink events, which carry the DSH session id, route straight into the chat filter;
+  the id is stored in `chrome.storage` and resumed on reconnect with its history replayed).
+  `send → session.prompt {mode: 'queue', content: [{type: 'text'}]}`, `Stop →
+  session.cancel`, the model picker switched early from M3 onto `session.selectModel`.
+  The pipe's `augmentor/models` now carries `provider` on every model entry (the legacy
+  panel contract reads it per row — omitting it made picker clicks send
+  `{provider: undefined}`, the user's first send error). Accepted in real Chrome
+  (`test/m2-e2e.mjs`, CDP): prompt → assistant reply rendered in the panel (default model
+  deepseek-official/deepseek-v4-flash), picker round-trip (DeepSeek-V4-Flash →
+  Qwen3.8-27B local), created session visible in `session.list`, M1 regressions intact
+  (403 fence row, target session renders 262 KB). *Remaining for M2: the five browser
+  tools + veil round-trip (the plugin registers `browser_tabs_list` today; the rest of the
+  tool set + sticky work-tab + veil lifecycle land next).*
+- **M3 — awareness, sessions & parity**: session picker/search, **Save button + Augmentor Chat workspace + housekeeping sweep**
+  (§5) (model picker done early with M2 — `session.selectModel` on the live session), **Open-in-DSH button**, approval/question UI, keep-alive tuning, settings
   (host-side namespace + panel-owned UI — in-page GUI card deferred, §10; incl. dedicated
   directory + retention), endpoint options.
 - **M4 — hardening & packaging**: reconnect/resync audit, error surfaces, version gate,

@@ -28,10 +28,16 @@ try {
 } catch (e) {
   console.warn('sidePanel setup failed', e)
 }
-// Fresh id per SW instance (and per "new chat"): the runtime persists
-// session logs by id and lazily creates an agent+session pair for any
-// unknown id (session/prompt), so a fresh random id is always safe.
+// The SW's chat identity doubles as the DSH session id (M2): session.create
+// accepts any non-empty id, so live downlink events (which carry the DSH
+// session id) route straight into this chat's filter. The id is remembered in
+// chrome.storage so an SW restart (idle expiry, browser restart) resumes the
+// same conversation; "new chat" mints a fresh one.
+const SESSION_STORAGE_KEY = 'augmentor-session-id'
 let SESSION_ID = `augmentor-${crypto.randomUUID().slice(0, 8)}`
+// Our DSH session exists on the server (verified on reconnect; set after
+// session.create).
+let sessionReady = false
 
 const state = {
   phase: 'disconnected', // disconnected | connecting | ready | error
@@ -45,6 +51,9 @@ const state = {
   // handshake). The panel's picker renders from both.
   catalog: null,
   selection: null,
+  // The DSH app's home directory (host.describe) — the working directory for
+  // the session we create on first prompt.
+  homeDir: null,
   // Session entries the panel renders (events + port/prompt/handshake/status).
   // Big on purpose: a fresh panel load replays this as the whole chat, so it
   // must hold a full working session (~2 entries per streamed chunk).
@@ -96,6 +105,44 @@ function saveSelection(sel) {
     chrome.storage.local.set({ [MODEL_STORAGE_KEY]: sel }, () => void chrome.runtime.lastError)
   } catch {
     /* storage unavailable: the selection lives in this SW instance only */
+  }
+}
+function loadStoredSessionId() {
+  return new Promise((resolve) => {
+    try {
+      chrome.storage.local.get(SESSION_STORAGE_KEY, (items) => {
+        const id = items?.[SESSION_STORAGE_KEY]
+        resolve(typeof id === 'string' && id ? id : null)
+      })
+    } catch {
+      resolve(null)
+    }
+  })
+}
+function saveSessionId(id) {
+  try {
+    chrome.storage.local.set({ [SESSION_STORAGE_KEY]: id }, () => void chrome.runtime.lastError)
+  } catch {
+    /* storage unavailable: the session id lives in this SW instance only */
+  }
+}
+function clearStoredSessionId() {
+  try {
+    chrome.storage.local.remove(SESSION_STORAGE_KEY, () => void chrome.runtime.lastError)
+  } catch {
+    /* storage unavailable */
+  }
+}
+// Does the DSH session exist on the server? session.history is the cheapest
+// probe: an unknown session answers `session "<id>" not found`, a network
+// failure rejects before any answer. true = exists, false = gone, null =
+// could not tell (proceed and let the next call surface it).
+async function sessionHistoryOk(sessionId) {
+  try {
+    const res = await request('session.history', { sessionId, maxMessages: 1 })
+    return res !== undefined && Array.isArray(res.events)
+  } catch (e) {
+    return /not found/i.test(String(e?.message ?? e)) ? false : null
   }
 }
 
@@ -185,6 +232,29 @@ function ensurePort() {
         provider: sel.provider,
         model: sel.model,
       })
+      state.homeDir = result?.serverInfo?.home ?? null
+      // M2: resume the conversation across the SW restart — if the DSH
+      // session we stored still exists on the server, replay its events into
+      // the log so a fresh panel re-renders the chat on load; if it is gone,
+      // forget it (the next prompt creates a new session).
+      const remembered = await loadStoredSessionId()
+      if (remembered) {
+        const exists = await sessionHistoryOk(remembered)
+        if (exists === true) {
+          SESSION_ID = remembered
+          saveSessionId(remembered)
+          sessionReady = true
+          const full = await request('session.history', { sessionId: remembered, maxMessages: 500 })
+          for (const h of full?.events ?? []) log('event', { sessionId: remembered, event: h.event })
+          broadcast(log('handshake', { event: 'session-resumed', sessionId: remembered, events: full?.events?.length ?? 0 }))
+        } else if (exists === false) {
+          clearStoredSessionId()
+        } else {
+          // Unreachable at boot: keep the remembered id as the candidate —
+          // the first prompt re-verifies it before creating anything.
+          SESSION_ID = remembered
+        }
+      }
       state.phase = 'ready'
       broadcast(log('handshake', { serverInfo: result.serverInfo, provider: sel.provider, model: sel.model }))
     } catch (e) {
@@ -836,31 +906,86 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     return
   }
   if (msg?.type === 'prompt') {
-    // New user turn (M2): the agent acts on the tab the user is looking at
-    // NOW; mid-turn the work tab stays sticky so a navigate → snapshot → click
-    // sequence never hops tabs under the model's feet. The veil is NOT shown
-    // here: it appears when the agent's FIRST browser action lands and is
-    // removed at turn end, so a text-only turn never marks the user's tab
-    // "under AI control".
-    //
-    // M1 is read-only toward the DSH app: prompting (session.create +
-    // session.prompt on a fresh session) lands in M2.
+    // M2: the DSH app IS the runtime — our chat is a real DSH session,
+    // created lazily on the first prompt (id = SESSION_ID, so live downlink
+    // events route into this chat) and remembered in storage. The agent acts
+    // on the tab the user is looking at NOW; mid-turn the work tab stays
+    // sticky so a navigate → snapshot → click sequence never hops tabs under
+    // the model's feet. The veil is NOT shown here: it appears when the
+    // agent's FIRST browser action lands and is removed at turn end, so a
+    // text-only turn never marks the user's tab "under AI control".
     if (state.phase !== 'ready') {
       sendResponse({ ok: false, error: state.error ?? `not ready (phase: ${state.phase})` })
       return
     }
-    sendResponse({ ok: false, error: 'prompting lands in M2 (session.create + session.prompt)' })
-    return
+    if (state.running) {
+      sendResponse({ ok: false, error: 'finish the current turn before sending' })
+      return
+    }
+    const text = String(msg.text ?? '').trim()
+    if (!text) {
+      sendResponse({ ok: false, error: 'empty prompt' })
+      return
+    }
+    ;(async () => {
+      try {
+        if (!sessionReady) {
+          // Verify the remembered session once per SW instance; on the first
+          // prompt (or after a "new chat") create the real DSH session.
+          const exists = await sessionHistoryOk(SESSION_ID)
+          if (exists !== true) {
+            if (exists === false) clearStoredSessionId()
+            SESSION_ID = `augmentor-${crypto.randomUUID().slice(0, 8)}`
+            saveSessionId(SESSION_ID)
+            await request('session.create', {
+              sessionId: SESSION_ID,
+              ...(state.homeDir ? { cwd: state.homeDir } : {}),
+            })
+            broadcast(log('handshake', { event: 'session-created', sessionId: SESSION_ID }))
+          }
+          sessionReady = true
+          if (state.selection) {
+            // A fresh session starts on the app's default model; point it at
+            // the remembered selection before the first turn.
+            try {
+              await request('session.selectModel', {
+                sessionId: SESSION_ID,
+                provider: state.selection.provider,
+                model: state.selection.model,
+              })
+            } catch {
+              /* the turn below surfaces a model error if it matters */
+            }
+          }
+        }
+        const res = await request('session.prompt', {
+          sessionId: SESSION_ID,
+          mode: 'queue',
+          content: [{ type: 'text', text }],
+        })
+        sendResponse({ ok: true, accepted: res?.accepted === true, sessionId: SESSION_ID })
+      } catch (e) {
+        sendResponse({ ok: false, error: e.message })
+      }
+    })()
+    return true // async
   }
   if (msg?.type === 'stop') {
-    // M1: no prompting, nothing to abort. (M2 re-wires this to session.cancel
-    // on the live turn; the veil/turnActive settle logic returns with it.)
+    // M2: abort the live turn (session.cancel). The turn settles with
+    // turn/end (aborted) and the agent goes idle, so the panel's Stop swaps
+    // back to Send and a new prompt resumes the same session.
     if (state.phase !== 'ready') {
       sendResponse({ ok: false, error: state.error ?? `not ready (phase: ${state.phase})` })
       return
     }
-    sendResponse({ ok: false, error: 'prompting lands in M2 (session.create + session.prompt)' })
-    return
+    if (!sessionReady) {
+      sendResponse({ ok: true, accepted: false })
+      return
+    }
+    request('session.cancel', { sessionId: SESSION_ID })
+      .then((res) => sendResponse({ ok: true, accepted: res?.accepted === true }))
+      .catch((e) => sendResponse({ ok: false, error: e.message }))
+    return true // async
   }
   if (msg?.type === 'log') {
     // Full history by default (fresh panel load replays the whole chat); a
@@ -900,10 +1025,10 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     return true // async
   }
   if (msg?.type === 'model') {
-    // Model switch (the panel's picker). The bridge restarts the runtime so
-    // the new model reaches the CURRENT session — which resumes from its
-    // persisted log — and we re-initialize the fresh process with the new
-    // selection. Switches only land while the turn is idle.
+    // Model switch (the panel's picker). M2: the DSH app IS the runtime, so
+    // the switch lands on our live session (session.selectModel); while no
+    // session exists yet it is remembered and applied at create (first
+    // prompt). Switches only land while the turn is idle.
     if (state.phase !== 'ready') {
       sendResponse({ ok: false, error: state.error ?? `not ready (phase: ${state.phase})` })
       return
@@ -927,50 +1052,40 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     const previous = state.selection
     state.selection = { provider, model }
     saveSelection(state.selection)
-    request('augmentor/switchModel', { provider, model })
-      .then(async (res) => {
-        if (res?.changed) {
-          // The bridge restarted the runtime: handshake the new process.
-          const result = await request('initialize', {
-            cwd: 'chrome-extension://augmentor',
-            provider,
-            model,
-          })
-          broadcast(log('handshake', { event: 'model-switch', provider, model, serverInfo: result.serverInfo }))
-        }
-        sendResponse({ ok: true, changed: Boolean(res?.changed), model: state.selection })
+    const apply = sessionReady
+      ? request('session.selectModel', { sessionId: SESSION_ID, provider, model })
+      : Promise.resolve({ selected: { provider, model } })
+    apply
+      .then(() => {
+        broadcast(log('handshake', { event: 'model-switch', provider, model }))
+        sendResponse({ ok: true, changed: true, model: state.selection })
       })
       .catch(async (e) => {
-        // Best effort: point the (possibly restarted) runtime back at the
-        // previous selection so the old conversation keeps working.
-        if (previous) {
+        // Best effort: point the runtime back at the previous selection so
+        // the old conversation keeps working (a failed selectModel does not
+        // kill the DSH app — no error state needed, just report it).
+        if (previous && sessionReady) {
           try {
-            await request('initialize', {
-              cwd: 'chrome-extension://augmentor',
+            await request('session.selectModel', {
+              sessionId: SESSION_ID,
               provider: previous.provider,
               model: previous.model,
             })
-            state.selection = previous
-            saveSelection(previous)
-            broadcast(log('handshake', { event: 'model-switch-rolled-back', provider: previous.provider, model: previous.model }))
           } catch {
-            // The rollback handshake failed too: the runtime is unusable.
-            // Drop to the error state — the panel's Connect reboots the pair
-            // (with the user's pick still saved, so a plain retry retries
-            // the switch).
-            fail(`model switch failed: ${e.message}`)
-            return
+            /* the rollback failed too: the next turn surfaces it */
           }
-        } else {
-          fail(`model switch failed: ${e.message}`)
-          return
         }
+        state.selection = previous
+        saveSelection(previous)
+        broadcast(log('handshake', { event: 'model-switch-rolled-back', provider: previous?.provider, model: previous?.model }))
         sendResponse({ ok: false, error: e.message })
       })
     return true // async
   }
   if (msg?.type === 'newchat') {
     SESSION_ID = `augmentor-${crypto.randomUUID().slice(0, 8)}`
+    saveSessionId(SESSION_ID)
+    sessionReady = false // the stored id was never a DSH session (yet)
     panelViewSession = null
     state.running = false
     state.log = []

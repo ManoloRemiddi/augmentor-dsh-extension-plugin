@@ -292,7 +292,11 @@ const localMethods = {
       groups: (models.groups ?? []).map((g) => ({
         provider: g.id,
         name: g.name,
-        models: (g.models ?? []).map((m) => ({ model: m.id, name: m.name, description: m.description })),
+        // Each model entry carries its provider: the panel's picker
+        // (unmodified legacy contract, sidepanel.js) reads m.provider per row
+        // to address session.selectModel — omitting it made row clicks send
+        // {provider: undefined}.
+        models: (g.models ?? []).map((m) => ({ provider: g.id, model: m.id, name: m.name, description: m.description })),
       })),
       failures: models.failures ?? [],
       default: { provider: describe.provider, model: describe.model },
