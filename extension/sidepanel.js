@@ -160,8 +160,11 @@ async function chooseModel(sel) {
 
 function openModelPop() {
   if (ui.state.running) return
-  renderPicker()
+  // Unhide FIRST: renderPicker skips the body while the popover is hidden
+  // (the early-return keeps 2 s polls cheap), so the body can only be built
+  // once the popover is visible — measuring below then sees its real height.
   modelPop.hidden = false
+  renderPicker()
   modelBtn.classList.add('open')
   // The chip sits at the panel bottom: the menu opens above it.
   const r = modelBtn.getBoundingClientRect()
@@ -188,6 +191,13 @@ document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape' && !modelPop.hidden) closeModelPop()
 })
 
+// While a DSH session is open (viewSessionId set), the panel renders THAT
+// session's events, not the SW's own sidecar transcript: the 2 s poll and
+// event pushes are filtered to it, and the model chip reflects the DSH app's
+// selection (fetched with the list), not the picker's.
+let viewSessionId = null
+let viewSessionTitle = null
+
 async function refresh() {
   try {
     // sinceSeq: the panel already rendered up to this event seq, so the SW
@@ -195,7 +205,8 @@ async function refresh() {
     // requests the full history — a fresh panel load replays the whole chat.
     const res = await send('log', { sinceSeq: ui.lastSeq })
     if (!res) return
-    ui.setState({ phase: res.phase, error: res.error, running: res.running })
+    ui.setState({ phase: res.phase, error: res.error, running: viewSessionId ? false : res.running })
+    if (viewSessionId) return // DSH view: chrome only, no sidecar entries
     applyModelInfo(res)
     ui.applyLog(res.log)
   } catch {
@@ -210,10 +221,134 @@ if (globalThis.chrome?.runtime?.onMessage) {
     // The SW pushes each new log entry with the event: render it directly.
     // The old per-event 'log' round-trip plus the 2 s poll is what made
     // streaming arrive in blocks.
-    if (msg.entry) ui.applyLog([msg.entry])
-    else refresh()
+    if (msg.entry) {
+      // In a DSH view only that session's events render (the SW's own
+      // transcript stays in its own log).
+      if (!viewSessionId || msg.entry.sessionId === viewSessionId) ui.applyLog([msg.entry])
+    } else refresh()
   })
 }
+
+// ── Sessions popover (M1: read the DSH app's own conversations) ─────────────
+// "≣ Sessions" lists the live DSH app's sessions through the pipe; a row
+// opens that session's history in this panel (the event vocabulary matches
+// the renderer). "＋ New chat" always returns to a fresh Augmentor view.
+const sessionsBtn = document.getElementById('sessions')
+const sessionsPop = document.getElementById('sessionspop')
+const sessionsPopBody = document.getElementById('sessionspop-body')
+
+function closeSessionsPop() {
+  sessionsPop.hidden = true
+  sessionsBtn.classList.remove('open')
+}
+
+function renderSessionsList(items) {
+  sessionsPopBody.replaceChildren()
+  if (!items?.length) {
+    const strip = document.createElement('div')
+    strip.className = 'sp-strip'
+    strip.textContent = 'No sessions in the DSH app'
+    sessionsPopBody.appendChild(strip)
+  }
+  for (const item of items) {
+    const title =
+      item.projections?.values?.title || item.cwd?.split('/').pop() || item.sessionId.slice(0, 12)
+    const row = document.createElement('button')
+    row.type = 'button'
+    row.className = 'sp-row'
+    row.title = item.cwd ?? item.sessionId
+    const dot = document.createElement('span')
+    dot.className = 'sp-dot' + (item.running ? ' on' : '')
+    const main = document.createElement('span')
+    main.className = 'sp-main'
+    const t = document.createElement('span')
+    t.className = 'sp-title'
+    t.textContent = title
+    const s = document.createElement('span')
+    s.className = 'sp-sub'
+    s.textContent = new Date(item.updatedAt ?? 0).toLocaleString()
+    main.append(t, s)
+    row.append(dot, main)
+    row.addEventListener('click', () => openDshSession(item, title))
+    sessionsPopBody.appendChild(row)
+  }
+  // Fence probe strip: C1 evidence, persisted by the pipe to
+  // trace/fence-probe.json.
+  const strip = document.createElement('div')
+  strip.className = 'sp-strip'
+  const label = document.createElement('span')
+  label.textContent = 'Trust-fence probe (this origin → DSH app)'
+  const btn = document.createElement('button')
+  btn.type = 'button'
+  btn.textContent = 'Probe'
+  btn.addEventListener('click', async () => {
+    btn.disabled = true
+    btn.textContent = '…'
+    try {
+      const res = await send('fence/probe')
+      strip.className = 'sp-strip ' + (res?.ok ? 'ok' : 'err')
+      const api = res?.probe?.api
+      const root = res?.probe?.root
+      const apiTxt = api?.error ? `api: blocked (${api.error})` : `api: HTTP ${api.status}`
+      const rootTxt = root?.error ? `control: blocked` : `control: HTTP ${root.status}`
+      label.textContent = `${apiTxt} · ${rootTxt}`
+      btn.textContent = 'Re-probe'
+    } finally {
+      btn.disabled = false
+    }
+  })
+  strip.append(label, btn)
+  sessionsPopBody.appendChild(strip)
+}
+
+async function openDshSession(item, title) {
+  closeSessionsPop()
+  const res = await send('session/history', { sessionId: item.sessionId })
+  if (!res?.ok) {
+    ui.sendFail(res?.error ?? 'could not load the session history')
+    return
+  }
+  // Reset the renderer's baseline so the DSH session's seqs don't collide
+  // with the sidecar transcript's (they are different sequences entirely).
+  viewSessionId = item.sessionId
+  viewSessionTitle = title
+  send('session/view', { sessionId: item.sessionId })
+  ui.clear()
+  ui.setState({ phase: 'ready', running: item.running })
+  document.getElementById('title').textContent = title
+  setViewComposer(false)
+  ui.applyLog(res.events.map((h) => ({ kind: 'event', sessionId: item.sessionId, event: h.event })))
+}
+
+sessionsBtn.addEventListener('click', async (e) => {
+  e.stopPropagation()
+  if (!sessionsPop.hidden) {
+    closeSessionsPop()
+    return
+  }
+  sessionsPop.hidden = false
+  renderSessionsList([])
+  sessionsPopBody.firstElementChild.textContent = 'Loading sessions…'
+  const r = sessionsBtn.getBoundingClientRect()
+  sessionsPop.style.top = `${r.bottom + 6}px`
+  sessionsPop.style.left = `${Math.max(8, Math.min(r.left, window.innerWidth - sessionsPop.offsetWidth - 8))}px`
+  const res = await send('session/list')
+  if (!res?.ok) {
+    sessionsPopBody.replaceChildren()
+    const strip = document.createElement('div')
+    strip.className = 'sp-strip err'
+    strip.textContent = res?.error ?? 'session list failed'
+    sessionsPopBody.appendChild(strip)
+    return
+  }
+  renderSessionsList(res.items)
+})
+document.addEventListener('mousedown', (e) => {
+  if (!sessionsPop.hidden && !sessionsPop.contains(e.target) && !sessionsBtn.contains(e.target)) closeSessionsPop()
+})
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && !sessionsPop.hidden) closeSessionsPop()
+})
 
 // Keep the footer's Send/Stop pair in lock-step with the run state: Stop shows
 // only while a turn is active; Send returns the moment the agent goes idle.
@@ -421,15 +556,31 @@ document.getElementById('connect').addEventListener('click', async () => {
   refresh()
 })
 
+// M1's DSH view is read-only: prompts land in M2 (session.create/prompt).
+// The composer is disabled while a DSH session is open.
+function setViewComposer(enabled) {
+  document.getElementById('input').disabled = !enabled
+  document.getElementById('send').disabled = !enabled
+}
+
 // "＋ New chat": the SW mints a fresh sessionId (the runtime lazily creates
-// the agent+session pair on the next prompt) and clears its log.
+// the agent+session pair on the next prompt) and clears its log. Also exits
+// the DSH view (M1), returning to a fresh Augmentor transcript.
 document.getElementById('newchat').addEventListener('click', async () => {
+  if (viewSessionId) {
+    viewSessionId = null
+    viewSessionTitle = null
+    send('session/view', { sessionId: null })
+    document.getElementById('title').textContent = 'Augmentor'
+    setViewComposer(true)
+  }
   const res = await send('newchat')
   if (res?.ok) ui.clear()
   refresh()
 })
 
 async function doSend() {
+  if (viewSessionId) return // DSH view is read-only in M1
   const input = document.getElementById('input')
   const text = input.value.trim()
   if (!text) return

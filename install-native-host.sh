@@ -20,24 +20,27 @@ if [ -z "$NODE_BIN" ]; then
 fi
 
 AUGMENTOR_DIR="$(cd "$(dirname "$0")" && pwd)"
-BRIDGE_SH="$AUGMENTOR_DIR/bin/bridge-host.sh"
+# M1: the host is the /api pipe (pipe.mjs), not the sidecar bridge (bridge.mjs).
+# A fresh wrapper name so an in-flight bridge process never sees the change.
+BRIDGE_SH="$AUGMENTOR_DIR/bin/pipe-host.sh"
 cat > "$BRIDGE_SH" <<EOF
 #!/bin/sh
-exec "$NODE_BIN" "$AUGMENTOR_DIR/bridge.mjs"
+exec "$NODE_BIN" "$AUGMENTOR_DIR/pipe.mjs"
 EOF
-chmod +x "$BRIDGE_SH" "$AUGMENTOR_DIR/bin/dsh-browser"
+chmod +x "$BRIDGE_SH"
+[ -f "$AUGMENTOR_DIR/bin/dsh-browser" ] && chmod +x "$AUGMENTOR_DIR/bin/dsh-browser" || true
 
 mkdir -p "$CONFIG_DIR/NativeMessagingHosts"
 OUT="$CONFIG_DIR/NativeMessagingHosts/$HOST_NAME.json"
 cat > "$OUT" <<EOF
 {
   "name": "$HOST_NAME",
-  "description": "Augmentor bridge (powered by DSH)",
+  "description": "Augmentor pipe (powered by DSH)",
   "path": "$BRIDGE_SH",
   "type": "stdio",
   "allowed_origins": ["chrome-extension://$EXT_ID/"]
 }
 EOF
 echo "wrote $OUT"
-echo "bridge: $BRIDGE_SH"
-echo "note: relaunch Chromium (or enable-dev-reload the extension) so the host manifest is picked up."
+echo "pipe: $BRIDGE_SH"
+echo "note: relaunch Chromium (or reload the extension) so the host manifest is picked up."

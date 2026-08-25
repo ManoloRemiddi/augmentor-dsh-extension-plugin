@@ -242,10 +242,19 @@ function summarizeParams(p) {
   return p
 }
 
+// The DSH session the panel is currently viewing (M1): its events stream to
+// the panel as direct pushes and NEVER enter state.log, so the SW keeps its
+// own transcript clean and the "new chat" filter stays authoritative.
+let panelViewSession = null
+
 // One session.event from the runtime. Only the current session is surfaced:
 // after "new chat" the runtime may still stream tail events for the
 // previous session.
 function onSessionEvent(params) {
+  if (panelViewSession && params?.sessionId === panelViewSession && panelViewSession !== SESSION_ID) {
+    broadcast({ type: 'evt', entry: { kind: 'event', sessionId: params.sessionId, event: params.event } })
+    return
+  }
   if (params?.sessionId !== SESSION_ID) return
   const ev = params?.event
   // Turn ended: the agent gives back control — "Done", then fade. But only
@@ -827,52 +836,31 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     return
   }
   if (msg?.type === 'prompt') {
-    // New user turn: the agent acts on the tab the user is looking at NOW.
-    // Mid-turn, the work tab stays sticky so a multi-step sequence
-    // (navigate → snapshot → click) never hops tabs under the model's feet.
-    workTabId = null
+    // New user turn (M2): the agent acts on the tab the user is looking at
+    // NOW; mid-turn the work tab stays sticky so a navigate → snapshot → click
+    // sequence never hops tabs under the model's feet. The veil is NOT shown
+    // here: it appears when the agent's FIRST browser action lands and is
+    // removed at turn end, so a text-only turn never marks the user's tab
+    // "under AI control".
+    //
+    // M1 is read-only toward the DSH app: prompting (session.create +
+    // session.prompt on a fresh session) lands in M2.
     if (state.phase !== 'ready') {
       sendResponse({ ok: false, error: state.error ?? `not ready (phase: ${state.phase})` })
       return
     }
-    // turnActive keeps mid-turn browser actions from arming the idle fade.
-    // The veil is NOT shown here: it appears when the agent's FIRST browser
-    // action lands (handleBrowserAction) and is removed at turn end. A
-    // text-only turn (correct this text, summarize this file…) must never
-    // mark the user's tab as "under AI control".
-    turnActive = true
-    request('session/prompt', {
-      sessionId: SESSION_ID,
-      contentBlocks: [{ type: 'text', text: String(msg.text ?? '') }],
-    })
-      .then((receipt) => {
-        broadcast(log('prompt', { messageId: receipt.messageId, text: String(msg.text).slice(0, 200) }))
-        sendResponse({ ok: true, messageId: receipt.messageId })
-      })
-      .catch((e) => sendResponse({ ok: false, error: e.message }))
-    return true // async
+    sendResponse({ ok: false, error: 'prompting lands in M2 (session.create + session.prompt)' })
+    return
   }
   if (msg?.type === 'stop') {
-    // Abort the live turn. The runtime records a `turn/end` (aborted, user
-    // cause) that settles the veil and returns the agent to idle — the session
-    // and its context are preserved, so the next prompt resumes seamlessly.
+    // M1: no prompting, nothing to abort. (M2 re-wires this to session.cancel
+    // on the live turn; the veil/turnActive settle logic returns with it.)
     if (state.phase !== 'ready') {
       sendResponse({ ok: false, error: state.error ?? `not ready (phase: ${state.phase})` })
       return
     }
-    // Drop the mid-turn guard now so a straggler browser action can't re-arm
-    // the idle fade; the turn/end event does the same, idempotently.
-    turnActive = false
-    request('session/interrupt', { sessionId: SESSION_ID })
-      .then((receipt) => {
-        broadcast(log('stop', { interrupted: receipt?.interrupted ?? false }))
-        sendResponse({ ok: true, interrupted: receipt?.interrupted ?? false })
-      })
-      .catch((e) => {
-        log('stop', { error: e.message })
-        sendResponse({ ok: false, error: e.message })
-      })
-    return true // async
+    sendResponse({ ok: false, error: 'prompting lands in M2 (session.create + session.prompt)' })
+    return
   }
   if (msg?.type === 'log') {
     // Full history by default (fresh panel load replays the whole chat); a
@@ -983,6 +971,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   }
   if (msg?.type === 'newchat') {
     SESSION_ID = `augmentor-${crypto.randomUUID().slice(0, 8)}`
+    panelViewSession = null
     state.running = false
     state.log = []
     state.wirelog = []
@@ -1002,5 +991,71 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       .catch((e) => log('handshake', { event: 'shutdown-failed', error: e.message }))
     sendResponse({ ok: true })
     return
+  }
+  if (msg?.type === 'session/list') {
+    // M1: the DSH app's own sessions, straight from the live app through the
+    // pipe (POST /api/session.list). Rows carry no title in the base payload;
+    // projections.values.title is present when the app named the session.
+    if (state.phase !== 'ready') {
+      sendResponse({ ok: false, error: state.error ?? `not ready (phase: ${state.phase})` })
+      return
+    }
+    request('session.list', {})
+      .then((res) => sendResponse({ ok: true, items: res?.items ?? [] }))
+      .catch((e) => sendResponse({ ok: false, error: e.message }))
+    return true // async
+  }
+  if (msg?.type === 'session/history') {
+    // M1: one DSH session's event history for the panel's live-event
+    // renderer (the vocabularies match: user/message, assistant/message,
+    // tool/call, …). The panel resets its seq baseline before applying.
+    if (state.phase !== 'ready') {
+      sendResponse({ ok: false, error: state.error ?? `not ready (phase: ${state.phase})` })
+      return
+    }
+    const sessionId = String(msg.sessionId ?? '')
+    if (!sessionId) {
+      sendResponse({ ok: false, error: 'missing sessionId' })
+      return
+    }
+    request('session.history', { sessionId, maxMessages: 500 })
+      .then((res) => sendResponse({ ok: true, events: res?.events ?? [], hasMore: res?.hasMore ?? false }))
+      .catch((e) => sendResponse({ ok: false, error: e.message }))
+    return true // async
+  }
+  if (msg?.type === 'session/view') {
+    // M1: arm/disarm the panel-view live tail (see onSessionEvent).
+    panelViewSession = msg.sessionId ? String(msg.sessionId) : null
+    sendResponse({ ok: true })
+    return
+  }
+  if (msg?.type === 'fence/probe') {
+    // M1 evidence (C1): fetch from THIS origin (chrome-extension://…) — the
+    // trust fence judges the request by Origin + sec-fetch-site metadata, so
+    // a service-worker fetch is exactly what the fence sees. The control
+    // fetch (/) proves the network path works regardless. Results are
+    // persisted by the pipe to trace/fence-probe.json.
+    const probePath = async (p) => {
+      try {
+        const t0 = Date.now()
+        const res = await fetch('http://127.0.0.1:3080' + p, { method: 'GET' })
+        const body = await res.text()
+        return { status: res.status, ok: res.ok, ms: Date.now() - t0, body: body.slice(0, 400) }
+      } catch (e) {
+        return { error: String(e?.message ?? e) }
+      }
+    }
+    Promise.all([probePath('/api/augmentor'), probePath('/')])
+      .then(async ([api, root]) => {
+        const out = { at: new Date().toISOString(), origin: self.location.origin, api, root }
+        try {
+          await request('trace/fence-probe', out)
+        } catch {
+          /* persistence is best-effort; the panel still shows the result */
+        }
+        sendResponse({ ok: true, probe: out })
+      })
+      .catch((e) => sendResponse({ ok: false, error: e.message }))
+    return true // async
   }
 })

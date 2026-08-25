@@ -268,6 +268,32 @@
   .mp-strip button { border: 1px solid var(--border2); background: transparent; color: var(--text2);
     font-size: 10.5px; font-weight: 600; border-radius: 5px; padding: 2px 8px; cursor: pointer; }
   .mp-strip button:hover { background: var(--hover); color: var(--text); }
+  /* Sessions popover (M1): browse the DSH app's own sessions. One row per
+     session — running dot, title (or cwd), last-activity time. A fence-probe
+     strip at the bottom records the C1 trust-fence evidence. */
+  #sessionspop { position: fixed; z-index: 10; width: 300px; padding: 8px;
+    background: var(--layer1); border: 1px solid var(--border2); border-radius: 10px;
+    box-shadow: 0 8px 30px rgba(0, 0, 0, 0.35); }
+  #sessionspop[hidden] { display: none; }
+  #sessionspop-body { max-height: 300px; overflow-y: auto; }
+  .sp-row { display: flex; align-items: center; gap: 8px; width: 100%; text-align: left;
+    border: none; background: transparent; color: var(--text); font: inherit;
+    border-radius: 7px; padding: 6px 8px; cursor: pointer; }
+  .sp-row:hover { background: var(--hover); }
+  .sp-main { min-width: 0; flex: 1; }
+  .sp-title { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    font-size: 12px; }
+  .sp-sub { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    font-size: 10.5px; color: var(--text3); }
+  .sp-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--text3); flex: none; }
+  .sp-dot.on { background: var(--brand); }
+  .sp-strip { display: flex; align-items: center; justify-content: space-between; gap: 8px;
+    font-size: 11px; color: var(--text3); padding: 8px 6px; }
+  .sp-strip.err { color: var(--err); }
+  .sp-strip.ok { color: var(--brand); }
+  .sp-strip button { border: 1px solid var(--border2); background: transparent; color: var(--text2);
+    font-size: 10.5px; font-weight: 600; border-radius: 5px; padding: 2px 8px; cursor: pointer; }
+  .sp-strip button:hover { background: var(--hover); color: var(--text); }
   #stats { flex: 1; min-width: 0; font-size: 10.5px; line-height: 18px; color: var(--text3);
     overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
   #input { flex: 1; resize: none; border: 1px solid var(--border2); border-radius: 8px;
@@ -295,6 +321,7 @@
     </button>
     <button id="newchat" class="hbtn" title="Start a new session">＋ New chat</button>
     <button id="connect" class="hbtn">Connect</button>
+    <button id="sessions" class="hbtn" title="Browse DSH app sessions (M1)">≣ Sessions</button>
   </header>
   <div id="logwrap">
     <div id="log"></div>
@@ -375,6 +402,9 @@
      app's model catalog, rows rendered by sidepanel.js. -->
 <div id="modelpop" hidden role="dialog" aria-label="Choose model">
   <div id="modelpop-body"></div>
+</div>
+<div id="sessionspop" hidden role="dialog" aria-label="DSH app sessions">
+  <div id="sessionspop-body"></div>
 </div>
 <script type="module" src="sidepanel.js"></script>
 </body>

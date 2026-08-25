@@ -13,3 +13,6 @@ __pycache__/
 
 # Runtime scratch dir
 agent-workdir/
+
+# Node deps (root + plugin/)
+node_modules/
