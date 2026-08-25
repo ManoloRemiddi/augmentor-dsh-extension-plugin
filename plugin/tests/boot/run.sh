@@ -27,7 +27,11 @@ set -u
 
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 PLUGIN_DIR=$(dirname "$(dirname "$SCRIPT_DIR")")
-ENTRY="$PLUGIN_DIR/src/index.ts"
+# The name carries a query string, exactly like the live deploy row
+# (cordis.patch.yml: index.ts?src=<commit>): the loader re-imports only when
+# `name` changes, and a fresh module URL (query) is what beats the ESM cache —
+# booting with it here proves the cold-boot path resolves `file.ts?query`.
+ENTRY="$PLUGIN_DIR/src/index.ts?src=boot-test"
 NODE_BIN=${NODE_BIN:-node}
 REAL_HOME=${DSH_HOME:-$HOME/.dsh}
 
