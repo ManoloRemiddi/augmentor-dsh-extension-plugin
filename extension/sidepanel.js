@@ -18,7 +18,6 @@ const ui = createChatUI({
   status: document.getElementById('status'),
   input: document.getElementById('input'),
   send: document.getElementById('send'),
-  connect: document.getElementById('connect'),
   top: document.getElementById('top'),
 })
 
@@ -552,11 +551,6 @@ for (const b of themeSeg.querySelectorAll('button'))
   b.addEventListener('click', () => setTheme(b.dataset.themeOpt))
 syncThemeSeg()
 
-document.getElementById('connect').addEventListener('click', async () => {
-  await send('connect')
-  refresh()
-})
-
 // M1's DSH view is read-only: prompts land in M2 (session.create/prompt).
 // The composer is disabled while a DSH session is open.
 function setViewComposer(enabled) {
@@ -647,7 +641,7 @@ document.getElementById('stop').addEventListener('click', async () => {
 const taskParam = new URLSearchParams(location.search).get('task')
 if (taskParam) {
   document.getElementById('input').value = taskParam
-  document.getElementById('connect').click()
+  send('connect')
   const waitForSend = setInterval(() => {
     const sendBtn = document.getElementById('send')
     if (!sendBtn.disabled) {

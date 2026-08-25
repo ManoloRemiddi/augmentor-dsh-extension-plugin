@@ -126,17 +126,18 @@ for (let i = 0; i < 40; i++) {
   if (rs === 'complete') break
   await sleep(500)
 }
-if (!await ev('!!document.getElementById("connect")')) fail('sidepanel DOM not ready')
+if (!await ev('!!document.getElementById("title")')) fail('sidepanel DOM not ready')
 process.stderr.write('[m3] sidepanel DOM ready\n')
 
-// ---------- 1. Connect (real SW + NMH pipe + live server) ----------
-await ev('document.getElementById("connect").click()')
+// ---------- 1. Auto-connect (real SW + NMH pipe + live server) ----------
+// There is no Connect button: the SW connects on boot (top-level ensurePort)
+// and retries on a backoff after any failure. The page load's first message
+// wakes the SW, so 'connected' must arrive unaided.
 let status = null
 for (let i = 0; i < 60; i++) {
   await sleep(500)
   status = await ev('document.getElementById("status").textContent')
   if (status === 'connected') break
-  if (String(status).startsWith('error')) fail(`panel error: ${status}`)
 }
 if (status !== 'connected') fail(`never connected (status=${status})`)
 process.stderr.write('[m3] connected (real SW + pipe + live server)\n')
@@ -187,12 +188,14 @@ process.stderr.write(`[m3] new session ${SID} in ${CHATDIR} (cwd pinning)\n`)
 }
 
 // ---------- 5. Tap #save -> badge + workspace attach ----------
-const saveState = () => ev('(() => ({ text: document.getElementById("save").textContent, cls: document.getElementById("save").className }))()')
-if ((await saveState()).text.trim() !== '☆ Save') fail('badge should start unsaved', await saveState())
+// Icon-only badge: state = .saved class (the star FILLS) + tooltip.
+const saveState = () => ev('(() => ({ cls: document.getElementById("save").className, title: document.getElementById("save").title }))()')
+const isSaved = (s) => String(s?.cls).split(/\s+/).includes('saved')
+if (isSaved(await saveState())) fail('badge should start unsaved', await saveState())
 await ev('document.getElementById("save").click()')
 let savedUi = null
-for (let i = 0; i < 20; i++) { await sleep(500); savedUi = await saveState(); if (savedUi.text.includes('Saved')) break }
-if (!savedUi?.text.includes('Saved') || !String(savedUi?.cls).includes('saved')) fail('save badge did not flip', savedUi)
+for (let i = 0; i < 20; i++) { await sleep(500); savedUi = await saveState(); if (isSaved(savedUi)) break }
+if (!isSaved(savedUi) || !String(savedUi?.title).includes('unsave')) fail('save badge did not flip', savedUi)
 let row = ((await rpc('workspace.list', {})).items ?? []).find((w) => w.path === CHATDIR)
 if (!row || row.title !== 'Augmentor Chat') fail('workspace row', row)
 if (!(row.sessionIds ?? []).includes(SID)) fail('session not attached after panel Save', row)
@@ -201,8 +204,8 @@ process.stderr.write('[m3] SAVE: badge flipped + workspace.list shows the attach
 // ---------- 6. Tap again -> unsave (detach, workspace survives) ----------
 await ev('document.getElementById("save").click()')
 let unsavedUi = null
-for (let i = 0; i < 20; i++) { await sleep(500); unsavedUi = await saveState(); if (unsavedUi?.text.trim() === '☆ Save') break }
-if (unsavedUi?.text.trim() !== '☆ Save') fail('unsave badge did not clear', unsavedUi)
+for (let i = 0; i < 20; i++) { await sleep(500); unsavedUi = await saveState(); if (!isSaved(unsavedUi)) break }
+if (isSaved(unsavedUi)) fail('unsave badge did not clear', unsavedUi)
 row = ((await rpc('workspace.list', {})).items ?? []).find((w) => w.path === CHATDIR)
 if (!row) fail('workspace vanished after unsave', row)
 if ((row.sessionIds ?? []).includes(SID)) fail('session still attached after unsave', row)
@@ -229,11 +232,11 @@ process.stderr.write(`[m3] cleanup: ${SID} archived (end state = swept chat)\n`)
 // ---------- evidence ----------
 console.log(JSON.stringify({
   status,
-  buttons: { save: (await saveState()).text, openindsh: await ev('!!document.getElementById("openindsh")') },
+  buttons: { save: (await saveState()).title, openindsh: await ev('!!document.getElementById("openindsh")') },
   prompt: { marker: MARKER, replyChars: reply.length, settled },
   session: { id: SID, cwd: CHATDIR },
-  save: { badge: '✓ Saved', attachedInWorkspaceList: true },
-  unsave: { badge: '☆ Save', detachedInWorkspaceList: true },
+  save: { badge: 'filled accent star (saved)', attachedInWorkspaceList: true },
+  unsave: { badge: 'star outline (unsaved)', detachedInWorkspaceList: true },
   openInDsh: opened.url,
   cleanup: { archived: true },
 }, null, 1))

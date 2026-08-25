@@ -954,3 +954,35 @@ Version 0.1.11 → 0.1.12.
 **Verified.** Headless-Chromium geometry probe of the real `sidepanel.html`:
 no header overflow at 300/340/400px, both connected and disconnected
 states; status text fits at the 400px default width.
+
+## 14. Addendum — auto-connect: the Connect button is gone (2026-08-26)
+
+**Problem.** The panel's Connect button was the *only* thing that ever called
+`ensurePort()`: after an SW idle-kill, a pipe death, or a DSH restart the
+panel sat "disconnected" until a human pressed it. One more thing for the
+user to learn, and an icon that mostly just sat there.
+
+**Design.** Always-connected, two drivers, no button:
+1. **Boot connect** — `sw.js` now calls `ensurePort()` at the top level of
+   every SW boot (cold start, idle-kill revival, browser restart, extension
+   reload). `ensurePort`'s existing guard (port open / phase `connecting`)
+   makes concurrent triggers a no-op. The panel's first message wakes a cold
+   SW, so opening the side panel *is* the connect.
+2. **Backoff retry** — `fail()` arms `scheduleReconnect()`: 1s → 2s → 4s →
+   8s → 16s → 30s steady (capped so a dead DSH never spins the native
+   host; fast enough that a recovered DSH is picked up within seconds with
+   zero user action). `retryCount` resets on `ready`.
+
+**UX.** Header loses the Connect icon (the other five stay). The status
+line's error state is now `reconnecting… (last error)` instead of
+`error: …`, and the dot pulses red while failing — the state is transient
+by design, so the UI says what is happening, not what to click. The
+`'connect'` SW message type survives for the `?task=` test hook
+(`send('connect')` replaces the removed button click).
+
+**Tests.** `panel-e2e.mjs` and `m3-e2e.mjs` no longer click anything: they
+wait for `connected` to arrive unaided. Both pass — panel-e2e (real sw.js
+in a vm, real pipe, live server) and m3-e2e (real Chromium + real SW + NMH
+pipe + live DSH), which also got its badge assertions rewritten for the
+icon-only Save star from §13 (it still read the old `☆ Save` text and
+would have failed on the 0.1.12 build).

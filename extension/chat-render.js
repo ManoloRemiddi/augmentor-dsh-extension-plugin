@@ -194,7 +194,6 @@ export function createChatUI(els) {
   const $status = els.status
   const $input = els.input
   const $send = els.send
-  const $connect = els.connect
   const $top = els.top
 
   let assistantEl = null // block container: Think(s) + one .md text container
@@ -588,13 +587,14 @@ export function createChatUI(els) {
           : phase === 'connecting'
             ? 'connecting…'
             : phase === 'error'
-              ? `error: ${error ?? ''}`
+              // No Connect button: the SW retries on a backoff, so an error
+              // state is transient — say what is happening, not what to click.
+              ? `reconnecting… (${error ?? 'unknown error'})`
               : running
                 ? 'working…'
                 : 'disconnected'
     }
     if ($send) $send.disabled = phase !== 'ready' || running
-    if ($connect) $connect.hidden = phase === 'ready' || phase === 'connecting'
   }
 
   function applyLog(log) {

@@ -63,7 +63,7 @@
   #dot { width: 8px; height: 8px; border-radius: 50%; background: var(--text3); flex: none; }
   #dot[data-phase="ready"] { background: var(--brand); }
   #dot[data-phase="connecting"] { background: var(--warn); animation: pulse 1s infinite; }
-  #dot[data-phase="error"] { background: var(--err); }
+  #dot[data-phase="error"] { background: var(--err); animation: pulse 1s infinite; }
   @keyframes pulse { 50% { opacity: 0.4; } }
   #logo { width: 18px; height: 18px; flex: none; display: block; }
   #title { font-size: 13px; font-weight: 600; overflow: hidden;
@@ -78,8 +78,6 @@
     color: var(--text2); cursor: pointer; padding: 0; }
   .hbtn:hover { background: var(--hover); color: var(--text); }
   .hbtn svg { display: block; }
-  #connect { background: var(--brand); color: #fff; }
-  #connect:hover { background: var(--brand); filter: brightness(1.1); color: #fff; }
   /* M3: Save badge — a saved chat reads as "done": the star FILLS in the
      accent (a filled shape, not a hover tint). */
   #save.saved { color: var(--accent, var(--brand)); }
@@ -351,13 +349,6 @@
         <path d="M6.9 3.5H4.75a1.25 1.25 0 0 0-1.25 1.25v6.5a1.25 1.25 0 0 0 1.25 1.25h6.5a1.25 1.25 0 0 0 1.25-1.25V9.1" />
         <path d="M9.9 3.5h2.6v2.6" />
         <path d="M12.2 3.8 7.9 8.1" />
-      </svg>
-    </button>
-    <button id="connect" class="hbtn" title="Connect to DSH" aria-label="Connect to DSH">
-      <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor"
-        stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-        <path d="M6.67 8.67a3.33 3.33 0 0 0 5.03.36l2-2a3.33 3.33 0 0 0-4.71-4.71L7.85 3.46" />
-        <path d="M9.33 7.33a3.33 3.33 0 0 0-5.03-.36l-2 2a3.33 3.33 0 0 0 4.71 4.71l1.14-1.14" />
       </svg>
     </button>
     <button id="sessions" class="hbtn" title="Browse DSH app sessions (M1)" aria-label="Browse sessions">

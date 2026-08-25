@@ -6,9 +6,10 @@
 // unmodified extension module graph; the SW is the unmodified sw.js.
 // Emulated: only the chrome.* surfaces (connectNative bridged to the spawned
 // pipe; SW<->panel messages bridged; one shared storage.local Map).
-// Flow: click #connect -> wait 'connected' -> click #sessions -> click Probe
-// (asserts pipe persisted) -> click the target session row -> assert the
-// conversation's text rendered into #log.
+// Flow: wait for the SW's auto-connect (top-level ensurePort; no button) ->
+// wait 'connected' -> click #sessions -> click Probe (asserts pipe persisted)
+// -> click the target session row -> assert the conversation's text rendered
+// into #log.
 import { spawn } from 'node:child_process'
 import vm from 'node:vm'
 import fs from 'node:fs'
@@ -161,11 +162,9 @@ process.stderr.write(`[harness] panel imported; listeners: panel=${panelListener
 const doc = window.document
 const statusText = () => doc.getElementById('status')?.textContent
 
-// ---------- 1. Connect ----------
-await doc.getElementById('connect').click()
+// ---------- 1. Auto-connect (the real sw.js connects at vm-boot) ----------
 let waited = 0
 while (!['connected'].includes(statusText()) && waited < 30000) {
-  if (statusText()?.startsWith('error')) fail(`panel error state: ${statusText()}`)
   await sleep(250); waited += 250
 }
 if (statusText() !== 'connected') fail(`panel never reached 'connected' (got: ${statusText()})`)

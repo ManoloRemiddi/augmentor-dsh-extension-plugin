@@ -42,6 +42,7 @@ let sessionReady = false
 const state = {
   phase: 'disconnected', // disconnected | connecting | ready | error
   error: null,
+  retryCount: 0, // consecutive failed attempts (backoff ladder; reset on ready)
   running: false,
   port: null,
   reqSeq: 0,
@@ -270,6 +271,7 @@ function ensurePort() {
           SESSION_ID = remembered
         }
       }
+      state.retryCount = 0
       state.phase = 'ready'
       broadcast(log('handshake', { serverInfo: result.serverInfo, provider: sel.provider, model: sel.model }))
     } catch (e) {
@@ -278,8 +280,25 @@ function ensurePort() {
   })()
 }
 
-// Drop to the error state: the panel shows the message + a Connect button
-// whose press re-runs the whole handshake (fresh port, fresh selection check).
+// Drop to the error state. There is NO Connect button for the user to press —
+// the panel shows "reconnecting…" and a backoff retry below re-runs the whole
+// handshake (fresh port, fresh selection check) until the server is back.
+let reconnectTimer = null
+
+function scheduleReconnect(message) {
+  if (reconnectTimer) return // a retry is already armed
+  state.retryCount += 1
+  // 1s, 2s, 4s, 8s, 16s, then 30s steady — a dead DSH must not spin the
+  // native host, but a recovered one must be picked up without user action.
+  const delay = Math.min(30000, 1000 * 2 ** Math.min(state.retryCount - 1, 4))
+  state.error = `${message} — retrying in ${delay / 1000}s`
+  broadcast()
+  reconnectTimer = setTimeout(() => {
+    reconnectTimer = null
+    ensurePort()
+  }, delay)
+}
+
 function fail(message) {
   state.phase = 'error'
   state.error = message
@@ -287,6 +306,7 @@ function fail(message) {
   state.pending.forEach((w) => w.reject(new Error(message)))
   state.pending.clear()
   broadcast()
+  scheduleReconnect(message)
 }
 
 function post(msg) {
@@ -1254,3 +1274,10 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     return true // async
   }
 })
+
+// Always connected: the pipe is the extension's spine, so connect on EVERY SW
+// boot (cold start, idle-kill revival, browser restart) instead of waiting
+// for a human to press something. ensurePort's guard (port open or
+// 'connecting') makes this idempotent with the backoff retries and any
+// explicit 'connect' message.
+ensurePort()
