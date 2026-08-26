@@ -1175,3 +1175,22 @@ This had two independent causes, both fixed:
 deployment) both green at 0.1.18. The model-chip geometry was verified with a
 dedicated real-Chromium probe before/after the CSS fix (item 2 numbers above).
 The pipe's no-drop queue is exercised by every real e2e run's downlink stream.
+
+### 15.5 — v0.1.19: bulletproof flat icons + expand icon to the far right (2026-08-26)
+
+Two follow-ups from the 0.1.18 review:
+
+1. **Header icons flat, no exceptions.** The 0.1.18 fix removed the explicit
+   `:hover` rules, but the user still saw a background on the top-bar icons.
+   A full audit of every `background` rule in the stylesheet found none left
+   on the header buttons (all `transparent`), so the remaining source was the
+   browser's default button chrome (pressed/focus states, UA buttonface).
+   Fixed belt-and-braces: `appearance: none` on `.hbtn`/`.hicon` plus an
+   explicit state pin — `:hover`, `:active`, `:focus`, `:focus-visible` all
+   locked to `background: transparent; box-shadow: none`. No state can ever
+   paint a rectangle behind an icon.
+2. **Expand icon (open-in-DSH) moved to the far right**, immediately before
+   the theme/color disc. Header order is now: logo, title, new chat, save,
+   sessions, expand, color.
+
+`panel-e2e` green at 0.1.19.
