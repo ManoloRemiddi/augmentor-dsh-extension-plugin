@@ -1326,3 +1326,60 @@ Verified the domain resolves (HTTPS 200, GitHub Pages; HTTP 301 → HTTPS).
 
 m3-e2e: new step 9 asserts the link's href is exactly
 `https://augmentoragent.com/` (normalized by the href property).
+
+### 15.11 — Website refresh vs v0.1.25 + real-UI screenshot pipeline (2026-08-26)
+
+User request: check augmentoragent.com against the app as it is today (v0.1.25);
+the top image showed the old UI; update everything needed. The site is GitHub
+Pages from `ManoloRemiddi/augmentoragent.com` (main branch, repo root, CNAME
+custom domain); the local working copy `augmentor/website/` is gitignored in the
+product repo and mirrors the site files (site repo README: keep in sync).
+
+Audit findings (site claim → reality):
+- Install B said `dsh plugin --profile <name> add @deepseek-ai/dsh-augmentor` —
+  wrong. The package is `dsh-augmentor` (private, in-repo `plugin/`); the
+  current DSH (11.23.0) plugin system reconciles a profile dependency whose
+  manifest declares `dsh.bundle.patch` into the layer stack, so the real command
+  is `dsh plugin --profile <name> add <repo>/plugin`.
+- Install A said "hit Connect" — stale since v0.1.16/0.1.17 (top-level
+  `ensurePort()` auto-connect with backoff; no button in the UI).
+- Heads-up "reads the installation version at handshake and surfaces a clear
+  incompatibility" — overstated. The handshake result carries `version` +
+  `dshVersion` (pipe.mjs) but nothing gates or surfaces drift; it only lands in
+  the pipe log ("DSH app ready: dsh X…").
+- docs FAQ "endpoint field in the extension options" — no options page exists.
+  The pipe dials `$DSH_AUGMENTOR_URL` (default `http://127.0.0.1:3080`), merged
+  from the repo's `.env`; the SW gets the endpoint from the pipe's serverInfo.
+- docs architecture box said "bridge.mjs (repurposed bridge)" — the live pipe is
+  `pipe.mjs`; `bridge.mjs`/`dsh-browser.mjs` are legacy files.
+- Model picker mock + marquee showed Llama-3.1-8B — replaced with the real
+  catalog shape (local llama.cpp group: Qwen3.8-27B Q6_K_XL / -NVFP4 GX10;
+  cloud DeepSeek group).
+- Missing shipped features: tab awareness (v0.1.24), Browse list of the latest
+  20 chats (v0.1.21–0.1.23). Added as feature cards + copy.
+- Verified correct and kept: the five `browser_*` tools, the trust-fence
+  section, "no browser client connected", NMH manifest path, "targets the tab
+  you're looking at" (true since v0.1.24), stats.
+
+Changes (site repo, commit e294cbd): real screenshots in (see below), honest
+install copy (A: auto-connects; B: `dsh plugin add <repo>/plugin` with the
+`dsh.bundle` explanation; auto-install prompt steps 3/5/6), softened heads-up,
+`pipe.mjs` naming throughout, endpoint FAQ → `DSH_AUGMENTOR_URL`, components
+table → shipped statuses, picker/marquee names, two new feature cards,
+v0.1.25 badge on the CTA caption, README package name. Mirror
+`augmentor/website/` re-synced from the clone.
+
+`lab/site-shots.mjs` (new): real-Chromium screenshot harness, m3-e2e pattern —
+headless Chromium (profile /tmp/chrome-shots-profile, port 9227,
+`--load-extension` + NMH manifest copied from ~/.config/chromium), drives the
+side panel with a probe prompt ("Open example.com and tell me the exact
+title"), waits for (a) the veil overlay `#__dshAugOverlay` canvas on the
+example.com tab → `assets/shot-veil.png` (1280×800 @2x) and (b) the panel
+assistant reply containing "Example Domain" + settled send button →
+`assets/shot-panel.png` (420×800 @2x, matching the CSS aspect ratio).
+Self-archives the probe session and asserts the archive. Verified without a
+vision model: PNG dimensions/bytes + the harness's DOM assertions
+(describe_image's vision backend is misconfigured in this environment).
+
+Note: `augmentor/README.md` (product repo) is badly stale (M0 sidecar, local
+DSH clone, `session/interrupt` patches) — not part of this pass.
