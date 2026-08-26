@@ -21,6 +21,7 @@ import vm from 'node:vm'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
+const here = path.dirname(fileURLToPath(import.meta.url))
 const useGit = process.argv.includes('--git')
 let src
 if (useGit) {
@@ -75,6 +76,7 @@ function makeChrome(scenario) {
     tabs: {
       onActivated: { addListener: (fn) => activatedListeners.push(fn) },
       onRemoved: { addListener: (fn) => removedListeners.push(fn) },
+      onUpdated: { addListener: () => {} },
       query: (opts = {}) => {
         let tabs = scenario.tabs
         if (opts.windowId != null) tabs = tabs.filter((t) => t.windowId === opts.windowId)
@@ -115,6 +117,11 @@ function loadSw(srcText, scenario) {
     String,
     Number,
     Array,
+    // sw.js does importScripts('theme-tokens.js'): run the real file in the
+    // same context so the veil code gets its color math.
+    importScripts: (file) => {
+      vm.runInContext(readFileSync(path.join(here, '..', 'extension', file), 'utf8'), sandbox)
+    },
   }
   vm.createContext(sandbox)
   vm.runInContext(srcText, sandbox, { filename: 'sw.js' })
@@ -218,6 +225,37 @@ console.log(`\n=== sw source: ${useGit ? 'git HEAD' : 'working tree'} ===`)
   messageListeners.forEach((fn) => fn({ type: 'prompt', text: 'find me something' }, {}, () => {}))
   const t3 = await sandbox.workTab()
   check('C2: new user message -> the tab the user is on now', t3.id === 202, `t3=${t3?.id}`)
+}
+
+// C3: a turn started from ANY source (panel, DSH app UI, CLI) re-resolves:
+// the downlink turn/start for this session clears the sticky work tab.
+{
+  const sc = {
+    windowsPerm: false,
+    focusedWindowId: 1,
+    tabs: [
+      { id: 101, url: 'https://a.example/', title: 'A', active: true, windowId: 1 },
+      { id: 202, url: 'https://b.example/', title: 'B', active: false, windowId: 1 },
+    ],
+  }
+  const { sandbox, messageListeners, portListeners } = loadSw(src, sc)
+  // SESSION_ID is a top-level `let` in the VM context (not a property), so
+  // read it the way the panel does: via the 'connect' response.
+  let sessionId = null
+  messageListeners.forEach((fn) => fn({ type: 'connect' }, {}, (res) => { sessionId = res.sessionId }))
+  const t1 = await sandbox.workTab()
+  // user flips to tab B; the turn is still running — sticky:
+  sc.tabs[0].active = false
+  sc.tabs[1].active = true
+  const t2 = await sandbox.workTab()
+  check('C3a: mid-turn the work tab stays sticky', t2.id === 101, `t2=${t2?.id}`)
+  // a new turn starts (downlink from any source):
+  portListeners.forEach((fn) =>
+    fn({ method: 'session.event', params: { sessionId, event: { type: 'turn/start', seq: 9 } } }),
+  )
+  await new Promise((r) => setTimeout(r, 5))
+  const t3 = await sandbox.workTab()
+  check('C3b: turn/start (any source) -> the tab the user is on now', t3.id === 202, `t3=${t3?.id}`)
 }
 
 // D: tabs_list marks exactly the tab the user is looking at.

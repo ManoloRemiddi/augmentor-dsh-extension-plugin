@@ -1276,3 +1276,36 @@ Fix (chat-render.js):
 m3-e2e: after the Browse row assertions it reopens the current session
 through the history path and asserts the assistant prose ("M3 OK") is
 actually rendered — the exact regression for this bug. Real-env e2e green.
+
+### 15.9 — v0.1.24: tab awareness restored (work tab re-resolves per turn) (2026-08-26)
+
+User report: "I ask a question from a new tab and it operates on an older
+tab." The agent had lost the tab awareness that v0.1.8
+(`503aff5` "Tab awareness: always resolve the tab the user is looking at")
+established.
+
+Root cause: `workTab()` caches `workTabId` and only re-resolves when the
+cached tab dies. In v0.1.8 the sidepanel `prompt` handler began with
+`workTabId = null` — the contract documented right above the browser-actions
+section ("re-resolved at the start of every user turn to the tab the user is
+actually looking at, then sticky within the turn"). The M1 refactor
+(`f97744c`) dropped that line, so the work tab stuck to the first tab
+adopted for the life of the service worker.
+
+Fix (sw.js):
+1. `prompt` handler: `workTabId = null` at the top again (restored verbatim
+   semantics; safe because the handler rejects while a turn runs, so
+   mid-turn stickiness is never broken).
+2. `onSessionEvent`: new `turn/start` hook — a turn started from ANY source
+   (panel, DSH app UI, CLI) re-resolves the work tab, since every turn emits
+   a `turn/start` downlink for this session.
+
+lab/worktab-test.mjs (was broken since v0.1.11 — `importScripts` and
+`tabs.onUpdated` missing from the stub):
+- stub fixed (importScripts runs the real theme-tokens.js in-context;
+  onUpdated no-op).
+- C2 now passes via the restored prompt-handler clear.
+- New C3: sticky mid-turn, re-resolved on a `turn/start` downlink from any
+  source.
+- A/B: against git HEAD C2 and C3b FAIL (t3=101 — the stale tab), against
+  the fix all 12 scenarios PASS.

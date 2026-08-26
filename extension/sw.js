@@ -394,6 +394,15 @@ function onSessionEvent(params) {
   }
   if (params?.sessionId !== SESSION_ID) return
   const ev = params?.event
+  // 0.1.24: a new user turn has started — from ANY source (panel, DSH app
+  // UI, CLI), not just the panel's prompt handler: re-resolve the work tab
+  // to the tab the user is looking at right now (the browser-actions
+  // docstring above is the contract: re-resolve at every turn start, sticky
+  // within the turn). Mid-turn this never fires: a new turn only starts
+  // after the previous one ends.
+  if (ev?.type === 'turn/start') {
+    workTabId = null
+  }
   // Turn ended: the agent gives back control — "Done", then fade. But only
   // if the veil is actually up: it follows real browser use, so a text-only
   // turn (no browser action) never showed it and must not get a phantom
@@ -1006,6 +1015,12 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     return true // async
   }
   if (msg?.type === 'prompt') {
+    // 0.1.24: new user turn → the agent acts on the tab the user is looking
+    // at NOW. This clear existed in v0.1.8 ("Tab awareness") and was dropped
+    // by the M1 refactor, so the agent kept operating on a stale tab after
+    // the user switched. Safe to clear here: the handler rejects while a
+    // turn is running, so mid-turn stickiness is never broken.
+    workTabId = null
     // M2: the DSH app IS the runtime — our chat is a real DSH session,
     // created lazily on the first prompt (id = SESSION_ID, so live downlink
     // events route into this chat) and remembered in storage. The agent acts
