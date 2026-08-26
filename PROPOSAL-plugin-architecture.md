@@ -1030,3 +1030,29 @@ say the same thing), so the strip reads as a plain app title, and the full
 *Augmentor powered by DSH* bold+italic brand — the only place it can be
 styled and linked — lives in the header row directly below it. No
 duplicated text; the requested design is intact where the platform allows.
+
+### 15.2 — Final agreed form: strip text, title row, double-click rename (0.1.16)
+
+Agreed with the user after the 15.1 exchange (which is superseded):
+
+- **Top strip** (Chromium-drawn, plain text only): reads
+  **"Augmentor Agent powered by DSH"** — the website's name rides in the
+  strip text, since the strip itself can never be a link. Manifest `name`
+  and page `<title>` both say this.
+- **Header row** is dedicated to the **chat title** again: the 15.0 brand
+  anchor + "powered by DSH" suffix are gone; `#title` is a plain bold span
+  (the live session name, "Augmentor" until DSH titles it). The connection
+  `#dot` was removed — state lives in the `#status` text.
+- **Header order** (left → right): **Expand** (`#openindsh`, first —
+  tooltip reframed "Expand into the full DSH session"), favicon, chat
+  title, (status text, right-aligned), new chat, save, theme+colour. The
+  sessions browse button was not in the agreed order and stays last, to be
+  removed on request.
+- **Double-click rename:** double-clicking the title swaps in an inline
+  input (pre-filled, selected). Enter/blur commits, Esc cancels. Commits go
+  panel → SW (`session/rename` handler) → pipe `session.rename
+  {sessionId, title}` — the same unary the GUI uses; DSH normalises, pins
+  the user title (auto-titling never overwrites) and pushes the
+  `session/title` event back, which chat-render re-asserts. Renaming is
+  live-chat only: the M1 browse view is read-only and the handler no-ops
+  there or when no session id is known yet.

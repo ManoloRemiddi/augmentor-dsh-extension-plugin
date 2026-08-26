@@ -14,7 +14,6 @@ const ui = createChatUI({
   title: document.getElementById('title'),
   model: document.getElementById('model-label'), // inner span: the chip is now a button
   stats: document.getElementById('stats'),
-  dot: document.getElementById('dot'),
   status: document.getElementById('status'),
   input: document.getElementById('input'),
   send: document.getElementById('send'),
@@ -591,7 +590,53 @@ saveBtn.addEventListener('click', async () => {
 document.getElementById('openindsh').addEventListener('click', () => {
   // Option A (proposal §5.3): plain app-open, no deep link — a new tab at the
   // running DSH app. The saved chat is visible there under Augmentor Chat.
+  // UX framing (0.1.16): this EXPANDS the sidecar into the full running DSH
+  // session — hence the tooltip copy.
   if (m3Endpoint) window.open(m3Endpoint.replace(/\/$/, '') + '/', '_blank', 'noopener')
+})
+
+// ── Chat title: double-click to rename ─────────────────────────────────────
+// Swaps the #title span for an inline input (pre-filled, selected). Enter or
+// blur commits through the SW → DSH `session.rename`; Esc cancels. A user-set
+// title is PINNED in DSH (auto-titling never overwrites it), and the host
+// pushes the session/title event back, which chat-render re-asserts. The M1
+// browse view is read-only — renaming only applies to the live Augmentor chat.
+const $title = document.getElementById('title')
+let titleEditing = false
+$title.addEventListener('dblclick', () => {
+  if (titleEditing || viewSessionId || !m3SessionId) return
+  const input = document.createElement('input')
+  input.id = 'title-edit'
+  input.value = $title.textContent
+  input.setAttribute('spellcheck', 'false')
+  $title.hidden = true
+  $title.after(input)
+  input.focus()
+  input.select()
+  titleEditing = true
+  let done = false
+  const finish = (commit) => {
+    if (done) return
+    done = true
+    const val = input.value.trim()
+    const cur = $title.textContent
+    input.remove()
+    $title.hidden = false
+    titleEditing = false
+    if (!commit || !val || val === cur) return
+    send('session/rename', { sessionId: m3SessionId, title: val }).then((res) => {
+      if (res?.ok === false) {
+        ui.sendFail(res.error)
+        return
+      }
+      $title.textContent = res?.title ?? val
+    })
+  }
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); finish(true) }
+    else if (e.key === 'Escape') { e.preventDefault(); finish(false) }
+  })
+  input.addEventListener('blur', () => finish(true))
 })
 
 // "＋ New chat": the SW mints a fresh sessionId (the runtime lazily creates

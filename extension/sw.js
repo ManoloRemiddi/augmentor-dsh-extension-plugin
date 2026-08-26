@@ -1236,6 +1236,26 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     sendResponse({ ok: true })
     return
   }
+  if (msg?.type === 'session/rename') {
+    // M3 (0.1.16): rename the live Augmentor chat (double-clicked header
+    // title). DSH pins a user-set title — auto-titling never overwrites it —
+    // and the host pushes the session/title event back through the pipe,
+    // which chat-render re-asserts in the header.
+    if (state.phase !== 'ready') {
+      sendResponse({ ok: false, error: state.error ?? `not ready (phase: ${state.phase})` })
+      return
+    }
+    const sessionId = String(msg.sessionId ?? '')
+    const title = String(msg.title ?? '').trim()
+    if (!sessionId || !title) {
+      sendResponse({ ok: false, error: 'missing sessionId or title' })
+      return
+    }
+    request('session.rename', { sessionId, title })
+      .then((res) => sendResponse({ ok: true, sessionId: res?.sessionId ?? sessionId, title: res?.title ?? title }))
+      .catch((e) => sendResponse({ ok: false, error: e.message }))
+    return true // async
+  }
   if (msg?.type === 'fence/probe') {
     // M1 evidence (C1): fetch from THIS origin (chrome-extension://…) — the
     // trust fence judges the request by Origin + sec-fetch-site metadata, so

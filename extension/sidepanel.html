@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>Augmentor</title>
+<title>Augmentor Agent powered by DSH</title>
 <link rel="icon" type="image/svg+xml" href="favicon.svg">
 <script src="vendor/marked.min.js"></script>
 <!-- Theme + color restore must be a file, not inline: MV3's default
@@ -60,22 +60,18 @@
 
   header { flex: none; display: flex; align-items: center; gap: 4px;
     padding: 9px 10px; border-bottom: 1px solid var(--border); }
-  #dot { width: 8px; height: 8px; border-radius: 50%; background: var(--text3); flex: none; }
-  #dot[data-phase="ready"] { background: var(--brand); }
-  #dot[data-phase="connecting"] { background: var(--warn); animation: pulse 1s infinite; }
-  #dot[data-phase="error"] { background: var(--err); animation: pulse 1s infinite; }
-  @keyframes pulse { 50% { opacity: 0.4; } }
+   /* (the old connection #dot was removed in 0.1.16 — state lives in #status) */
   #logo { width: 18px; height: 18px; flex: none; display: block; }
-  /* Brand: "Augmentor" bold + "powered by DSH" small-italic, linked to the
-     site. The title span stays dynamic (a session's name lands here when it
-     has one); the suffix is the constant brand tail. */
-  #brand { flex: none; display: flex; align-items: baseline; gap: 5px; max-width: 38%;
-    min-width: 0; overflow: hidden; text-decoration: none; color: var(--text); }
-  #title { font-size: 12.5px; font-weight: 700; overflow: hidden;
-    text-overflow: ellipsis; white-space: nowrap; }
-  #brand .powered { font-size: 9.5px; font-weight: 400; font-style: italic;
-    color: var(--text3); white-space: nowrap; }
-  #brand:hover #title { color: var(--brand); }
+   /* Chat title (plain — the top strip carries the brand). Double-click to
+      rename: an input swaps in over the span, pre-filled with the current
+      name (Enter/blur commits via session.rename, Esc cancels). */
+   #title { flex: none; max-width: 40%; min-width: 0; font-size: 12.5px; font-weight: 700;
+     overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: text; }
+   #title[hidden] { display: none; }
+   #title-edit { flex: none; width: 40%; box-sizing: border-box;
+     font-family: inherit; font-size: 12.5px; font-weight: 700; color: var(--text);
+     background: transparent; border: none; border-bottom: 1px solid var(--brand);
+     padding: 1px 2px; outline: none; }
   #status { font-size: 10.5px; color: var(--text3); flex: 1; min-width: 0;
     text-align: right; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   /* Header action buttons are icon-only (26px squares, stroke icons at 16px):
@@ -336,12 +332,17 @@
 <body>
 <div id="app">
   <header>
-    <span id="dot"></span>
+    <button id="openindsh" class="hbtn" title="Expand into the full DSH session"
+      aria-label="Expand into the full DSH session">
+      <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor"
+        stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M6.9 3.5H4.75a1.25 1.25 0 0 0-1.25 1.25v6.5a1.25 1.25 0 0 0 1.25 1.25h6.5a1.25 1.25 0 0 0 1.25-1.25V9.1" />
+        <path d="M9.9 3.5h2.6v2.6" />
+        <path d="M12.2 3.8 7.9 8.1" />
+      </svg>
+    </button>
     <img id="logo" src="favicon.svg" alt="" width="18" height="18">
-    <a id="brand" href="https://augmentoragent.com/" target="_blank" rel="noopener"
-      title="augmentoragent.com">
-      <span id="title">Augmentor</span><span class="powered">powered by DSH</span>
-    </a>
+    <span id="title" title="Double-click to rename">Augmentor</span>
     <span id="status">disconnected</span>
     <button id="hue" class="hicon" title="Theme + colors"
       aria-label="Color settings" aria-haspopup="dialog">
@@ -358,14 +359,6 @@
       <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor"
         stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
         <path d="M8 1.33l2.06 4.18 4.61.67-3.34 3.25.79 4.58-4.12-2.16-4.12 2.16.79-4.58-3.34-3.25 4.61-.67z" />
-      </svg>
-    </button>
-    <button id="openindsh" class="hbtn" title="Open the running DSH app in a new tab" aria-label="Open in DSH">
-      <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor"
-        stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-        <path d="M6.9 3.5H4.75a1.25 1.25 0 0 0-1.25 1.25v6.5a1.25 1.25 0 0 0 1.25 1.25h6.5a1.25 1.25 0 0 0 1.25-1.25V9.1" />
-        <path d="M9.9 3.5h2.6v2.6" />
-        <path d="M12.2 3.8 7.9 8.1" />
       </svg>
     </button>
     <button id="sessions" class="hbtn" title="Browse DSH app sessions (M1)" aria-label="Browse sessions">
