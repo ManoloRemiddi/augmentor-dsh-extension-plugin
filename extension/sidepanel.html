@@ -339,6 +339,11 @@
   .sp-strip button:hover { background: var(--hover); color: var(--text); }
   #stats { flex: 1; min-width: 0; font-size: 10.5px; line-height: 18px; color: var(--text3);
     overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+  /* 0.1.25: the site, one click away at the bottom of the dock — quiet at
+     rest, accent on hover, real <a> so middle-click / right-click behave. */
+  #site { flex: none; font-size: 10px; line-height: 18px; color: var(--text3);
+    text-decoration: none; white-space: nowrap; border-radius: 4px; padding: 0 3px; }
+  #site:hover { color: var(--brand); text-decoration: underline; }
   #input { flex: 1; resize: none; border: 1px solid var(--border2); border-radius: 8px;
     background: var(--bg); color: var(--text); font: inherit; padding: 8px 10px;
     max-height: 120px; outline: none; }
@@ -414,6 +419,8 @@
       </svg>
     </button>
     <span id="stats"></span>
+    <a id="site" href="https://augmentoragent.com" target="_blank" rel="noreferrer"
+      title="Learn about Augmentor — open augmentoragent.com">augmentoragent.com</a>
   </div>
 </div>
 <!-- Color popover (opened by the hue icon): positioned by sidepanel.js. -->

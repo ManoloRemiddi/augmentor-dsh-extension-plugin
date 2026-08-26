@@ -1309,3 +1309,20 @@ lab/worktab-test.mjs (was broken since v0.1.11 — `importScripts` and
   source.
 - A/B: against git HEAD C2 and C3b FAIL (t3=101 — the stale tab), against
   the fix all 12 scenarios PASS.
+
+### 15.10 — v0.1.25: brand link in the dock strip (2026-08-26)
+
+User request: at the bottom of the side panel, next to the model selection,
+a clickable element opening augmentoragent.com so users learn more and find
+the website.
+
+Added `#site` to `#strip` (sidepanel.html): a real `<a href="https://augmentoragent.com"
+target="_blank" rel="noreferrer">` labeled `augmentoragent.com`, flex-none at the
+far right after `#stats` (which flex-fills). Quiet at rest (10px, text3),
+accent + underline on hover. A genuine anchor — middle-click and
+right-click → open-in-new-tab work natively, no JS handler.
+
+Verified the domain resolves (HTTPS 200, GitHub Pages; HTTP 301 → HTTPS).
+
+m3-e2e: new step 9 asserts the link's href is exactly
+`https://augmentoragent.com/` (normalized by the href property).

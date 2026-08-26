@@ -272,10 +272,16 @@ const archived = (await rpc('workspace.list', {})).archivedSessionIds ?? []
 if (!archived.includes(SID)) fail('probe not archived', archived)
 process.stderr.write(`[m3] cleanup: ${SID} archived (end state = swept chat)\n`)
 
+// ---------- 9. Brand link: the site, one click away ----------
+const siteHref = await ev('(() => { const a = document.getElementById("site"); return a ? a.href : null })()')
+if (siteHref !== 'https://augmentoragent.com/') fail('brand link missing or wrong href', siteHref)
+process.stderr.write(`[m3] SITE: brand link ${siteHref}\n`)
+
 // ---------- evidence ----------
 console.log(JSON.stringify({
   status: 'connected',
   buttons: { save: (await saveState()).title, openindsh: await ev('!!document.getElementById("openindsh")') },
+  site: await ev('(() => { const a = document.getElementById("site"); return a ? a.href : null })()') || null,
   prompt: { marker: MARKER, replyChars: reply.length, settled },
   session: { id: SID, cwd: CHATDIR },
   save: { badge: 'filled accent star (saved)', attachedInWorkspaceList: true },
