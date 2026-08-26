@@ -160,15 +160,18 @@ for (const fn of panelListeners) panelEvtListener = fn
 process.stderr.write(`[harness] panel imported; listeners: panel=${panelListeners.length} sw=${swRuntimeListeners.length}\n`)
 
 const doc = window.document
-const statusText = () => doc.getElementById('status')?.textContent
+// 0.1.17: the header's "connected" status text was removed (the panel is
+// auto-connected; no persistent readout). Readiness is observed through the
+// send button, which updateChrome enables only when phase === 'ready'.
+const sendReady = () => !doc.getElementById('send').disabled
 
 // ---------- 1. Auto-connect (the real sw.js connects at vm-boot) ----------
 let waited = 0
-while (!['connected'].includes(statusText()) && waited < 30000) {
+while (!sendReady() && waited < 30000) {
   await sleep(250); waited += 250
 }
-if (statusText() !== 'connected') fail(`panel never reached 'connected' (got: ${statusText()})`)
-process.stderr.write(`[harness] panel status: connected (after ${waited}ms)\n`)
+if (!sendReady()) fail('panel never reached ready (send button stayed disabled)')
+process.stderr.write(`[harness] panel ready: send enabled (after ${waited}ms)\n`)
 
 // ---------- 2. Sessions popover ----------
 await doc.getElementById('sessions').click()
@@ -249,7 +252,7 @@ process.stderr.write(
 )
 
 const out = {
-  status: statusText(),
+  status: sendReady() ? 'ready' : 'not-ready',
   sessionRows: rows.length,
   probe: { api: probeData.api?.status, root: probeData.root?.status, fenced: probeData.fenced?.status, persisted: true },
   target: TARGET,

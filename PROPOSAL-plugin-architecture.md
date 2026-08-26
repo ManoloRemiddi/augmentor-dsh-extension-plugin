@@ -1056,3 +1056,53 @@ Agreed with the user after the 15.1 exchange (which is superseded):
   `session/title` event back, which chat-render re-asserts. Renaming is
   live-chat only: the M1 browse view is read-only and the handler no-ops
   there or when no session id is known yet.
+
+### 15.3 — v0.1.17 batch: DSH-icon expand, no status text, hue last, wider model, hidden snapshots, approval-mode seat
+
+Five requested changes, all in the sidecar chrome (no protocol changes
+beyond two pass-through settings unarys):
+
+- **Expand icon = DSH's sidebar icon.** `#openindsh` now embeds the exact
+  geometry of `IconPanelLeftOutline16` from the DSH GUI
+  (`ui-primitives/src/icons/index.tsx`, `ic_ds_panel_left_outline_16`):
+  16×16 viewBox, single evenodd `fill="currentColor"` path — the
+  rounded-rectangle panel with the left divider. The old
+  external-link-arrow strokes are gone; tooltip unchanged ("Expand into
+  the full DSH session").
+- **"connected" text removed.** The auto-connect design means a
+  persistent status readout is noise: `#status` (element + CSS + the
+  `status` ui option) is deleted. `#title` takes the freed space
+  (`flex: 1`). Readiness is still enforced — the Send button stays
+  disabled until the SW is ready; the e2e harnesses now observe that
+  state instead of the status text.
+- **Theme+colour last.** `#hue` moves to the right end of the header
+  (order: expand, favicon, title, new chat, save, sessions, hue).
+- **Model chip widened.** `#model-label` cap 26% → 55% of the strip:
+  full model names now fit; the stats line keeps the remainder and
+  ellipsis-truncates (it is the lower-priority side).
+- **Runtime-context snapshots are invisible.** The DSH system-prompt
+  plugin logs its context snapshots ("Current runtime context. This
+  snapshot supersedes…") as `user/message` events with
+  `source: {kind: 'plugin', plugin: '@deepseek-ai/dsh-system-prompt',
+  form: 'snapshot'}` — that is how the model-visible context stays
+  reconstructable from the log (DSH's model-visible⟺logged rule). The
+  panel rendered them as user bubbles; chat-render now skips every
+  `user/message` with `source.kind === 'plugin'` (which also covers the
+  user-approval policy-switch notice, same class of plumbing).
+- **Approval-mode seat (replaces the static "Full access" pill).** The
+  bottom-left chip is now a control over the DSH permission preset
+  (user setting ns `permission`, path `defaultPreset` — the same knob
+  the DSH GUI's settings row writes; the live web-host API exposes no
+  per-session runtime switch, and per DSH's settings-store contract the
+  preset applies to subsequently created sessions). Menu options and
+  their real semantics:
+  - *Read only* — sandbox read-only + approval ask
+  - *Manual (workspace write)* — sandbox workspace-write + approval ask
+    (wider actions prompt the user)
+  - *Automatic (full access)* — sandbox danger-full-access + approval
+    never (no prompts; GUI-style risk confirmation before selecting)
+  Panel → SW handlers `settings/describe` / `settings/mutate` → pipe
+  `settings.describe` / `settings.mutate` (pass-through, same envelope).
+  The pill shows the current preset, keeps the optimistic
+  `expectedRevision` from describe, and re-reads the accepted view from
+  the mutate response.

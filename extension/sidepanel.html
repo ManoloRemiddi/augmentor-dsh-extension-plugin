@@ -60,19 +60,20 @@
 
   header { flex: none; display: flex; align-items: center; gap: 4px;
     padding: 9px 10px; border-bottom: 1px solid var(--border); }
-   /* (the old connection #dot was removed in 0.1.16 — state lives in #status) */
+   /* (the connection dot and the "connected" status text were removed in
+      0.1.16/0.1.17 — the panel is auto-connected; the header has no
+      persistent state readout) */
   #logo { width: 18px; height: 18px; flex: none; display: block; }
    /* Chat title (plain — the top strip carries the brand). Double-click to
       rename: an input swaps in over the span, pre-filled with the current
       name (Enter/blur commits via session.rename, Esc cancels). */
-   #title { flex: none; max-width: 40%; min-width: 0; font-size: 12.5px; font-weight: 700;
+   #title { flex: 1; min-width: 0; font-size: 12.5px; font-weight: 700;
      overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: text; }
    #title[hidden] { display: none; }
-   #title-edit { flex: none; width: 40%; box-sizing: border-box;
+   #title-edit { flex: 1; min-width: 0; box-sizing: border-box;
      font-family: inherit; font-size: 12.5px; font-weight: 700; color: var(--text);
      background: transparent; border: none; border-bottom: 1px solid var(--brand);
      padding: 1px 2px; outline: none; }
-  #status { font-size: 10.5px; color: var(--text3); flex: 1; min-width: 0;
     text-align: right; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   /* Header action buttons are icon-only (26px squares, stroke icons at 16px):
      the old text labels crowded the bar at side-panel widths. Tooltips carry
@@ -243,17 +244,34 @@
   footer { flex: none; display: flex; gap: 8px; align-items: flex-end;
     padding: 10px 12px 8px; border-top: 1px solid var(--border); background: var(--layer1); }
 
-  /* Composer dock status strip (GUI parity): access mode · model · stats line. */
-  #strip { flex: none; display: flex; gap: 8px; align-items: center;
+  /* Composer dock status strip (GUI parity): approval mode · model · stats. */
+  #strip { flex: none; display: flex; gap: 8px; align-items: center; position: relative;
     padding: 5px 12px 7px; background: var(--layer1); border-top: 1px solid var(--border); }
+  /* 0.1.17: the access pill is now the approval-mode control — it reads the
+     DSH permission preset (settings ns "permission") and writes it back, the
+     same knob the DSH GUI's settings row uses. */
   #access { flex: none; font-size: 10.5px; color: var(--text2); background: var(--layer2);
-    border: 1px solid var(--border); border-radius: 999px; padding: 1.5px 8px; }
+    border: 1px solid var(--border); border-radius: 999px; padding: 1.5px 8px;
+    cursor: pointer; font-family: inherit; }
+  #access::after { content: '▾'; font-size: 8px; color: var(--text3); margin-left: 3px; }
+  #access:hover { border-color: var(--border2); color: var(--text); }
+  #access-menu { position: absolute; left: 10px; bottom: calc(100% + 6px); z-index: 30;
+    width: 250px; background: var(--bg); border: 1px solid var(--border2);
+    border-radius: 8px; box-shadow: 0 4px 16px rgba(0,0,0,.28); padding: 4px; }
+  .access-opt { display: block; width: 100%; text-align: left; background: none; border: none;
+    border-radius: 6px; padding: 6px 8px; cursor: pointer; font-family: inherit; }
+  .access-opt:hover { background: var(--hover); }
+  .access-opt .a-name { font-size: 12px; font-weight: 600; color: var(--text2); }
+  .access-opt.current .a-name { color: var(--brand); }
+  .access-opt .a-desc { font-size: 10.5px; color: var(--text3); margin-top: 1px; line-height: 1.35; }
   /* Model picker trigger (the DSH composer's model seat): chip + chevron. */
   #model { flex: none; display: inline-flex; align-items: center; gap: 5px;
     font-size: 10.5px; color: var(--text2); background: var(--layer2);
     border: 1px solid var(--border); border-radius: 999px; padding: 1.5px 8px;
     cursor: pointer; font-family: inherit; }
-  #model-label { max-width: 26%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  /* 0.1.17: the strip has room — let the full model name show (the stats
+     line keeps the rest and ellipsis-truncates, as the lower-priority side). */
+  #model-label { max-width: 55%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   #model .model-chev { flex: none; color: var(--text3); }
   #model:hover:not(:disabled) { border-color: var(--border2); color: var(--text); }
   #model:hover:not(:disabled) .model-chev { color: var(--text2); }
@@ -334,20 +352,13 @@
   <header>
     <button id="openindsh" class="hbtn" title="Expand into the full DSH session"
       aria-label="Expand into the full DSH session">
-      <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor"
-        stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-        <path d="M6.9 3.5H4.75a1.25 1.25 0 0 0-1.25 1.25v6.5a1.25 1.25 0 0 0 1.25 1.25h6.5a1.25 1.25 0 0 0 1.25-1.25V9.1" />
-        <path d="M9.9 3.5h2.6v2.6" />
-        <path d="M12.2 3.8 7.9 8.1" />
+      <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+        <path fillRule="evenodd" clipRule="evenodd" fill="currentColor"
+          d="M9.67272 0.522841C10.8339 0.522841 11.76 0.522714 12.4963 0.602493C13.2453 0.683657 13.8789 0.854248 14.4264 1.25197C14.7504 1.48739 15.0355 1.77247 15.2709 2.0965C15.6686 2.64394 15.8392 3.27758 15.9204 4.02655C16.0002 4.7629 16 5.68895 16 6.85014V9.14986C16 10.3111 16.0002 11.2371 15.9204 11.9735C15.8392 12.7224 15.6686 13.3561 15.2709 13.9035C15.0355 14.2275 14.7504 14.5126 14.4264 14.748C13.8789 15.1458 13.2453 15.3163 12.4963 15.3975C11.76 15.4773 10.8339 15.4772 9.67272 15.4772H6.3273C5.16611 15.4772 4.24006 15.4773 3.50371 15.3975C2.75474 15.3163 2.1211 15.1458 1.57366 14.748C1.24963 14.5126 0.964549 14.2275 0.729131 13.9035C0.331407 13.3561 0.160817 12.7224 0.0796529 11.9735C-0.000126137 11.2371 1.25338e-09 10.3111 1.25338e-09 9.14986V6.85014C1.25329e-09 5.68895 -0.000126137 4.7629 0.0796529 4.02655C0.160817 3.27758 0.331407 2.64394 0.729131 2.0965C0.964549 1.77247 1.24963 1.48739 1.57366 1.25197C2.1211 0.854248 2.75474 0.683657 3.50371 0.602493C4.24006 0.522714 5.16611 0.522841 6.3273 0.522841H9.67272ZM5.54303 1.88715V14.1118C5.78636 14.1128 6.04709 14.1169 6.3273 14.1169H9.67272C10.8639 14.1169 11.7032 14.1164 12.3493 14.0465C12.9824 13.9779 13.3497 13.8494 13.6268 13.6482C13.8354 13.4966 14.0195 13.3125 14.1711 13.1039C14.3723 12.8268 14.5007 12.4595 14.5693 11.8264C14.6393 11.1803 14.6398 10.341 14.6398 9.14986V6.85014C14.6398 5.65896 14.6393 4.81967 14.5693 4.1736C14.5007 3.54048 14.3723 3.17318 14.1711 2.89609C14.0195 2.68747 13.8354 2.50337 13.6268 2.35179C13.3497 2.1506 12.9824 2.02212 12.3493 1.95353C11.7032 1.88358 10.8639 1.88307 9.67272 1.88307H6.3273C6.04709 1.88307 5.78636 1.8862 5.54303 1.88715ZM4.1828 1.91166C3.99125 1.9216 3.8148 1.93577 3.65076 1.95353C3.01764 2.02212 2.65034 2.1506 2.37325 2.35179C2.16463 2.50337 1.98052 2.68747 1.82895 2.89609C1.62776 3.17318 1.49928 3.54048 1.43069 4.1736C1.36074 4.81967 1.36023 5.65896 1.36023 6.85014V9.14986C1.36023 10.341 1.36074 11.1803 1.43069 11.8264C1.49928 12.4595 1.62776 12.8268 1.82895 13.1039C1.98052 13.3125 2.16463 13.4966 2.37325 13.6482C2.65034 13.8494 3.01764 13.9779 3.65076 14.0465C3.81478 14.0642 3.99127 14.0774 4.1828 14.0873V1.91166Z" />
       </svg>
     </button>
     <img id="logo" src="favicon.svg" alt="" width="18" height="18">
     <span id="title" title="Double-click to rename">Augmentor</span>
-    <span id="status">disconnected</span>
-    <button id="hue" class="hicon" title="Theme + colors"
-      aria-label="Color settings" aria-haspopup="dialog">
-      <span class="hue-chip"></span>
-    </button>
     <button id="newchat" class="hbtn" title="Start a new session" aria-label="Start a new session">
       <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor"
         stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -368,6 +379,10 @@
         <path d="M2.9 4.5h.01M2.9 8h.01M2.9 11.5h.01" />
       </svg>
     </button>
+    <button id="hue" class="hicon" title="Theme + colors"
+      aria-label="Color settings" aria-haspopup="dialog">
+      <span class="hue-chip"></span>
+    </button>
   </header>
   <div id="logwrap">
     <div id="log"></div>
@@ -384,7 +399,7 @@
     <button id="stop" hidden title="Stop the current run">■ Stop</button>
   </footer>
   <div id="strip">
-    <span id="access">Full access</span>
+    <button id="access" type="button" title="Approval mode — click to change (applies to new chats)">Full access</button>
     <button id="model" hidden title="Switch model" aria-haspopup="dialog">
       <span id="model-label"></span>
       <svg class="model-chev" width="10" height="10" viewBox="0 0 16 16" fill="none"

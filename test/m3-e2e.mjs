@@ -132,14 +132,15 @@ process.stderr.write('[m3] sidepanel DOM ready\n')
 // ---------- 1. Auto-connect (real SW + NMH pipe + live server) ----------
 // There is no Connect button: the SW connects on boot (top-level ensurePort)
 // and retries on a backoff after any failure. The page load's first message
-// wakes the SW, so 'connected' must arrive unaided.
-let status = null
+// wakes the SW, so ready must arrive unaided. 0.1.17: the header's
+// "connected" text is gone — readiness is the send button's enabled state.
+let ready = false
 for (let i = 0; i < 60; i++) {
   await sleep(500)
-  status = await ev('document.getElementById("status").textContent')
-  if (status === 'connected') break
+  ready = await ev('!document.getElementById("send").disabled').catch(() => false)
+  if (ready) break
 }
-if (status !== 'connected') fail(`never connected (status=${status})`)
+if (!ready) fail('never connected (send stayed disabled)')
 process.stderr.write('[m3] connected (real SW + pipe + live server)\n')
 
 // ---------- 2. The M3 buttons exist (new panel shipped) ----------
@@ -231,7 +232,7 @@ process.stderr.write(`[m3] cleanup: ${SID} archived (end state = swept chat)\n`)
 
 // ---------- evidence ----------
 console.log(JSON.stringify({
-  status,
+  status: 'connected',
   buttons: { save: (await saveState()).title, openindsh: await ev('!!document.getElementById("openindsh")') },
   prompt: { marker: MARKER, replyChars: reply.length, settled },
   session: { id: SID, cwd: CHATDIR },

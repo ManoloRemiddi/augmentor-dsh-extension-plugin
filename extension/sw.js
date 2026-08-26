@@ -1256,6 +1256,42 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       .catch((e) => sendResponse({ ok: false, error: e.message }))
     return true // async
   }
+  if (msg?.type === 'settings/describe') {
+    // 0.1.17: the panel reads the permission preset (the "Full access" seat)
+    // through the stock DSH settings API — same route the DSH GUI's own
+    // settings row uses.
+    if (state.phase !== 'ready') {
+      sendResponse({ ok: false, error: state.error ?? `not ready (phase: ${state.phase})` })
+      return
+    }
+    request('settings.describe', msg.ns ? { ns: msg.ns } : {})
+      .then((res) => sendResponse({ ok: true, value: res ?? null }))
+      .catch((e) => sendResponse({ ok: false, error: e.message }))
+    return true // async
+  }
+  if (msg?.type === 'settings/mutate') {
+    // 0.1.17: the user switches the permission preset (auto vs manual
+    // approval). Applies to subsequently created sessions, per DSH's own
+    // settings-store contract.
+    if (state.phase !== 'ready') {
+      sendResponse({ ok: false, error: state.error ?? `not ready (phase: ${state.phase})` })
+      return
+    }
+    const ns = String(msg.ns ?? '')
+    const ops = Array.isArray(msg.ops) ? msg.ops : []
+    if (!ns || ops.length === 0) {
+      sendResponse({ ok: false, error: 'missing ns or ops' })
+      return
+    }
+    request('settings.mutate', {
+      ns,
+      ops,
+      ...(msg.expectedRevision !== undefined ? { expectedRevision: msg.expectedRevision } : {}),
+    })
+      .then((res) => sendResponse({ ok: true, value: res ?? null }))
+      .catch((e) => sendResponse({ ok: false, error: e.message }))
+    return true // async
+  }
   if (msg?.type === 'fence/probe') {
     // M1 evidence (C1): fetch from THIS origin (chrome-extension://…) — the
     // trust fence judges the request by Origin + sec-fetch-site metadata, so

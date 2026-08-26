@@ -14,7 +14,6 @@ const ui = createChatUI({
   title: document.getElementById('title'),
   model: document.getElementById('model-label'), // inner span: the chip is now a button
   stats: document.getElementById('stats'),
-  status: document.getElementById('status'),
   input: document.getElementById('input'),
   send: document.getElementById('send'),
   top: document.getElementById('top'),
@@ -654,6 +653,96 @@ document.getElementById('newchat').addEventListener('click', async () => {
   if (res?.ok) ui.clear()
   refresh()
 })
+
+// ── Approval mode (the "Full access" seat at the bottom of the chat) ────────
+// The DSH permission preset decides what the agent may do and whether it
+// asks first: read-only / workspace-write (manual approval for wider actions)
+// / danger-full-access (automatic, no prompts). It is a USER SETTING (ns
+// "permission", path defaultPreset) — the same knob the DSH GUI's own
+// settings row writes — and per DSH's settings-store contract it applies to
+// subsequently created sessions, not the one already running.
+const ACCESS_PRESETS = [
+  { value: 'read-only', label: 'Read only', desc: 'Nothing is written; attempts ask for approval.' },
+  { value: 'workspace-write', label: 'Manual (workspace write)', desc: 'Writes inside the workspace; wider actions ask you first.' },
+  { value: 'danger-full-access', label: 'Automatic (full access)', desc: 'Everything allowed automatically — no approval prompts.' },
+]
+const $access = document.getElementById('access')
+let accessCurrent = null
+let accessRevision = null
+let accessMenu = null
+
+function accessLabel(value) {
+  const p = ACCESS_PRESETS.find((x) => x.value === value)
+  return p ? p.label : value ?? 'unknown'
+}
+
+async function loadAccess() {
+  const res = await send('settings/describe', { ns: 'permission' })
+  if (!res?.ok) return
+  const view = (res.value?.namespaces ?? []).find((n) => n.ns === 'permission')
+  if (!view) return
+  accessCurrent = view.value?.defaultPreset ?? null
+  accessRevision = view.revision ?? null
+  $access.textContent = accessLabel(accessCurrent)
+  $access.title = `Approval mode: ${accessLabel(accessCurrent)} — applies to new chats. Click to change.`
+}
+loadAccess()
+// First paint may race the SW's auto-connect: one retry covers it.
+setTimeout(loadAccess, 3000)
+
+function closeAccessMenu() {
+  accessMenu?.remove()
+  accessMenu = null
+}
+
+$access.addEventListener('click', (e) => {
+  e.stopPropagation()
+  if (accessMenu) { closeAccessMenu(); return }
+  accessMenu = document.createElement('div')
+  accessMenu.id = 'access-menu'
+  for (const p of ACCESS_PRESETS) {
+    const opt = document.createElement('button')
+    opt.type = 'button'
+    opt.className = 'access-opt' + (p.value === accessCurrent ? ' current' : '')
+    const name = document.createElement('span')
+    name.className = 'a-name'
+    name.textContent = p.value === accessCurrent ? '✓ ' + p.label : p.label
+    const desc = document.createElement('span')
+    desc.className = 'a-desc'
+    desc.textContent = p.desc
+    opt.append(name, desc)
+    opt.addEventListener('click', (ev) => { ev.stopPropagation(); pickAccess(p.value) })
+    accessMenu.appendChild(opt)
+  }
+  document.getElementById('strip').appendChild(accessMenu)
+})
+document.addEventListener('click', closeAccessMenu)
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeAccessMenu() })
+
+async function pickAccess(value) {
+  closeAccessMenu()
+  if (value === accessCurrent) return
+  // The DSH GUI gates the full-access preset behind an explicit risk
+  // confirmation; mirror that stance here.
+  if (value === 'danger-full-access' &&
+      !window.confirm('Switch to Automatic (full access)?\n\nNo approval prompts will appear — every action is allowed automatically. Applies to new chats.')) {
+    return
+  }
+  const res = await send('settings/mutate', {
+    ns: 'permission',
+    ops: [{ op: 'set', path: ['defaultPreset'], value }],
+    ...(accessRevision !== null ? { expectedRevision: accessRevision } : {}),
+  })
+  if (res?.ok === false) {
+    ui.sendFail('Switch approval mode: ' + (res.error ?? 'failed'))
+    return
+  }
+  const view = res.value
+  accessCurrent = view?.value?.defaultPreset ?? value
+  accessRevision = view?.revision ?? accessRevision
+  $access.textContent = accessLabel(accessCurrent)
+  $access.title = `Approval mode: ${accessLabel(accessCurrent)} — applies to new chats. Click to change.`
+}
 
 async function doSend() {
   if (viewSessionId) return // DSH view is read-only in M1
