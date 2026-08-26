@@ -1106,3 +1106,72 @@ beyond two pass-through settings unarys):
   The pill shows the current preset, keeps the optimistic
   `expectedRevision` from describe, and re-reads the accepted view from
   the mutate response.
+
+### 15.4 — v0.1.18 batch: long-press approval mode, hugging model chip, flat header icons, no-drop pipe + self-heal Browse (2026-08-26)
+
+Four user-reported fixes, one release. Each was root-caused against the live
+deployment (trace files, real-Chromium geometry probes, the live pipe process)
+before a line was changed.
+
+**1. Approval mode moves off the strip into a long-press on New Chat.**
+The bottom-strip `#access` pill (the 0.1.17 approval-mode seat) is removed —
+markup, CSS, and its JS wiring. The same three DSH permission presets
+(`read-only` / `workspace-write` / `danger-full-access`, user setting ns
+`permission`, path `defaultPreset`) are now reached by a **450 ms long-press on
+the header New Chat icon**, which opens a fixed-position menu anchored under
+the icon (`position: fixed`, JS-placed from the button's rect). A short press /
+click still starts a new chat exactly as before: the `pointerdown` timer opens
+the menu on a long hold and sets a `suppressClick` flag that swallows the
+release click (`stopPropagation` so the document-level closer does not eat the
+menu just opened). **Default is Automatic (full access):** if the setting has
+no `defaultPreset` at all, the panel writes `danger-full-access` once on load;
+an explicit user choice is never overridden. The current mode is surfaced in
+the New Chat button's `title` (tooltip) in place of the old pill text. The SW
+`settings/describe` / `settings/mutate` pass-throughs are unchanged.
+
+**2. The model chip hugs its text.** Root cause measured in real headless
+Chromium, not guessed: `#model-label { max-width: 55% }` was a **circular
+constraint** — the label's cap is 55% of the chip, but the chip's width came
+from that same label, so the chip sized to the *full* model name while the
+label truncated to half of it (measured: chip 181 px, label 90 px, full text
+~151 px). A percentage of a self-referencing width can only ever clamp at 55%
+of the final box. Fix: replace the percentage with a fixed `max-width: 240px`
+cap so the chip hugs the actual letters and only genuinely long
+provider/model ids trim. Re-measured after the fix: chip 175 px, label 142 px
+(full name, no ellipsis) — the dead extra width is gone.
+
+**3. Header icons are flat.** The strip's icon buttons (`.hbtn`, `.hicon`,
+`#save.saved`, `#hue`) carried a `:hover` background/box-shadow the user never
+asked for. All four hover rules removed; icons are plain strokes with no
+background and no hover state. State still reads off the icon itself (the save
+star fills in the accent when saved) — never off a hover tint.
+
+**4. Browse no longer dead-ends on a stale "native messaging host" error.**
+This had two independent causes, both fixed:
+
+- **The pipe dropped frames.** `pipe.mjs sendToExt` used a single
+  `stdoutDrained` flag: if the previous stdout write was still draining it
+  **silently dropped** the new frame (`if (!stdoutDrained) return`). Under the
+  DSH GUI's constant downlink firehose, stdout is almost always busy, so
+  extension *request responses* (notably `session.list` — the Browse list)
+  could vanish and the SW's pending waiter hung for the full 60 s timeout.
+  Replaced with a real **write queue**: every frame is enqueued and a pump
+  flushes on `process.stdout` `'drain'`, chaining so no frame is ever lost.
+- **The SW surfaced a stale error instead of self-healing.** When `phase !==
+  'ready'` (a just-woken or mid-reconnect SW — the backoff timer is dropped by
+  an SW idle-kill, so a stale `state.error` can persist), the old code
+  returned that stored error string verbatim and left the retry up to a
+  possibly-lost timer. Now a `requireReady()` helper on the user-initiated read
+  handlers (`session/list`, `session/history`, `settings/describe`,
+  `settings/mutate`) **forces a fresh reconnect immediately** (reset backoff,
+  clear the armed timer, fresh `connectNative`) and waits up to ~3.5 s for the
+  handshake. The request timeout itself dropped 60 s → 20 s so a genuinely lost
+  response fails fast enough for the panel's retry to recover. As the final
+  layer, the panel's Browse handler **retries once after 1.5 s** before showing
+  an error strip — a transient not-ready now reads as "the list just takes a
+  beat," not a dead-end.
+
+**Evidence.** `panel-e2e` (stubbed) and `m3-e2e` (real Chrome against the live
+deployment) both green at 0.1.18. The model-chip geometry was verified with a
+dedicated real-Chromium probe before/after the CSS fix (item 2 numbers above).
+The pipe's no-drop queue is exercised by every real e2e run's downlink stream.

@@ -330,7 +330,17 @@ sessionsBtn.addEventListener('click', async (e) => {
   const r = sessionsBtn.getBoundingClientRect()
   sessionsPop.style.top = `${r.bottom + 6}px`
   sessionsPop.style.left = `${Math.max(8, Math.min(r.left, window.innerWidth - sessionsPop.offsetWidth - 8))}px`
-  const res = await send('session/list')
+  let res = await send('session/list')
+  // 0.1.18: a not-ready SW (just woken, or mid-reconnect) already forces a
+  // fresh handshake inside the SW (requireReady) — give it 1.5 s and retry
+  // once before surfacing an error. This is what turns the old
+  // "Error when communicating with the native messaging host." dead-end into
+  // a list that simply takes a beat to appear.
+  if (!res?.ok) {
+    await new Promise((r) => setTimeout(r, 1500))
+    const again = await send('session/list')
+    if (again?.ok) res = again
+  }
   if (!res?.ok) {
     sessionsPopBody.replaceChildren()
     const strip = document.createElement('div')
@@ -641,7 +651,33 @@ $title.addEventListener('dblclick', () => {
 // "＋ New chat": the SW mints a fresh sessionId (the runtime lazily creates
 // the agent+session pair on the next prompt) and clears its log. Also exits
 // the DSH view (M1), returning to a fresh Augmentor transcript.
-document.getElementById('newchat').addEventListener('click', async () => {
+// 0.1.18: a LONG PRESS (450 ms hold) no longer starts a chat — it opens the
+// approval-mode menu that lived in the removed bottom-strip pill. Short
+// press = new chat, exactly as before.
+const $newchat = document.getElementById('newchat')
+const LONG_PRESS_MS = 450
+let lpTimer = null
+let suppressClick = false
+$newchat.addEventListener('pointerdown', (e) => {
+  if (e.pointerType === 'mouse' && e.button !== 0) return
+  clearTimeout(lpTimer)
+  lpTimer = setTimeout(() => {
+    lpTimer = null
+    suppressClick = true
+    openAccessMenu()
+  }, LONG_PRESS_MS)
+})
+for (const t of ['pointerup', 'pointercancel', 'pointerleave']) {
+  $newchat.addEventListener(t, () => { clearTimeout(lpTimer); lpTimer = null })
+}
+$newchat.addEventListener('click', async (e) => {
+  if (suppressClick) {
+    // The click that released a long press: the menu just opened — swallow
+    // it (stopPropagation so the document-level closer doesn't eat the menu).
+    suppressClick = false
+    e.stopPropagation()
+    return
+  }
   if (viewSessionId) {
     viewSessionId = null
     viewSessionTitle = null
@@ -654,19 +690,21 @@ document.getElementById('newchat').addEventListener('click', async () => {
   refresh()
 })
 
-// ── Approval mode (the "Full access" seat at the bottom of the chat) ────────
+// ── Approval mode (long-press on New Chat, 0.1.18) ──────────────────────────
 // The DSH permission preset decides what the agent may do and whether it
 // asks first: read-only / workspace-write (manual approval for wider actions)
 // / danger-full-access (automatic, no prompts). It is a USER SETTING (ns
 // "permission", path defaultPreset) — the same knob the DSH GUI's own
 // settings row writes — and per DSH's settings-store contract it applies to
 // subsequently created sessions, not the one already running.
+// Default = Automatic (full access): if the setting has no defaultPreset at
+// all, we set it once; an explicit user choice is never overridden.
 const ACCESS_PRESETS = [
   { value: 'read-only', label: 'Read only', desc: 'Nothing is written; attempts ask for approval.' },
   { value: 'workspace-write', label: 'Manual (workspace write)', desc: 'Writes inside the workspace; wider actions ask you first.' },
   { value: 'danger-full-access', label: 'Automatic (full access)', desc: 'Everything allowed automatically — no approval prompts.' },
 ]
-const $access = document.getElementById('access')
+const DEFAULT_ACCESS = 'danger-full-access'
 let accessCurrent = null
 let accessRevision = null
 let accessMenu = null
@@ -676,6 +714,10 @@ function accessLabel(value) {
   return p ? p.label : value ?? 'unknown'
 }
 
+function accessTitle() {
+  return `Approval mode: ${accessLabel(accessCurrent)} — applies to new chats. Hold New Chat to change.`
+}
+
 async function loadAccess() {
   const res = await send('settings/describe', { ns: 'permission' })
   if (!res?.ok) return
@@ -683,8 +725,19 @@ async function loadAccess() {
   if (!view) return
   accessCurrent = view.value?.defaultPreset ?? null
   accessRevision = view.revision ?? null
-  $access.textContent = accessLabel(accessCurrent)
-  $access.title = `Approval mode: ${accessLabel(accessCurrent)} — applies to new chats. Click to change.`
+  if (accessCurrent === null) {
+    // No preset chosen yet → default to full access (automatic), once.
+    const set = await send('settings/mutate', {
+      ns: 'permission',
+      ops: [{ op: 'set', path: ['defaultPreset'], value: DEFAULT_ACCESS }],
+      ...(accessRevision !== null ? { expectedRevision: accessRevision } : {}),
+    })
+    if (set?.ok) {
+      accessCurrent = set.value?.value?.defaultPreset ?? DEFAULT_ACCESS
+      accessRevision = set.value?.revision ?? accessRevision
+    }
+  }
+  $newchat.title = accessTitle()
 }
 loadAccess()
 // First paint may race the SW's auto-connect: one retry covers it.
@@ -695,11 +748,14 @@ function closeAccessMenu() {
   accessMenu = null
 }
 
-$access.addEventListener('click', (e) => {
-  e.stopPropagation()
-  if (accessMenu) { closeAccessMenu(); return }
+function openAccessMenu() {
+  closeAccessMenu()
   accessMenu = document.createElement('div')
   accessMenu.id = 'access-menu'
+  const head = document.createElement('div')
+  head.className = 'access-head'
+  head.textContent = 'Approval mode — new chats'
+  accessMenu.appendChild(head)
   for (const p of ACCESS_PRESETS) {
     const opt = document.createElement('button')
     opt.type = 'button'
@@ -714,8 +770,14 @@ $access.addEventListener('click', (e) => {
     opt.addEventListener('click', (ev) => { ev.stopPropagation(); pickAccess(p.value) })
     accessMenu.appendChild(opt)
   }
-  document.getElementById('strip').appendChild(accessMenu)
-})
+  document.body.appendChild(accessMenu)
+  // Anchor under the New Chat icon (fixed — the old pill seat is gone).
+  const r = $newchat.getBoundingClientRect()
+  const top = Math.min(r.bottom + 6, window.innerHeight - accessMenu.offsetHeight - 8)
+  const left = Math.max(8, Math.min(r.left, window.innerWidth - accessMenu.offsetWidth - 8))
+  accessMenu.style.top = `${top}px`
+  accessMenu.style.left = `${left}px`
+}
 document.addEventListener('click', closeAccessMenu)
 document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeAccessMenu() })
 
@@ -740,8 +802,7 @@ async function pickAccess(value) {
   const view = res.value
   accessCurrent = view?.value?.defaultPreset ?? value
   accessRevision = view?.revision ?? accessRevision
-  $access.textContent = accessLabel(accessCurrent)
-  $access.title = `Approval mode: ${accessLabel(accessCurrent)} — applies to new chats. Click to change.`
+  $newchat.title = accessTitle()
 }
 
 async function doSend() {

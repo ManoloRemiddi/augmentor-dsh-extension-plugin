@@ -100,10 +100,28 @@ function resolveToken() {
 const traceName = `pipe-${new Date().toISOString().replace(/[:.]/g, '-')}.jsonl`
 const traceFile = path.join(TRACE_DIR, traceName)
 await mkdir(TRACE_DIR, { recursive: true })
+// 0.1.18: the trace was growing without bound — one live session with the
+// GUI streaming through the pipe produced 212 MB in 17 minutes (every
+// downlink frame AND its ext<-pipe echo were writeFileSync'd to disk),
+// adding synchronous disk I/O to every relayed frame. The audit trail that
+// matters (ext->pipe requests, log, respond, plugin, fence) is kept; pure
+// relay frames are skipped and the file stops growing at the cap.
+const TRACE_MAX_BYTES = 50 * 1024 * 1024
+let traceBytes = 0
+let traceCapped = false
 function trace(entry) {
   entry.at = Date.now()
+  if (entry.kind === 'downlink' || entry.kind === 'ext<-pipe') return
+  if (traceCapped) return
+  const line = JSON.stringify(entry) + '\n'
+  traceBytes += line.length
+  if (traceBytes > TRACE_MAX_BYTES) {
+    traceCapped = true
+    log('trace capped at ~50 MB — stopping trace writes (kept: ' + traceFile + ')')
+    return
+  }
   try {
-    writeFileSync(traceFile, JSON.stringify(entry) + '\n', { flag: 'a' })
+    writeFileSync(traceFile, line, { flag: 'a' })
   } catch {
     /* tracing must never kill the pipe */
   }
@@ -151,15 +169,36 @@ async function dshRespond(rpcId, extMsg) {
 }
 
 // ------------------------------------------------- extension frame I/O
-let stdoutDrained = true
+// 0.1.18: queue + drain-chaining. The old version DROPPED a frame whenever a
+// previous write was still draining — under the DSH GUI's downlink firehose
+// stdout is almost always busy, so extension REQUEST RESPONSES (session.list,
+// models, initialize, …) could silently vanish and the SW's pending waiter
+// hung for the full timeout. Every frame now enters the queue; the pump
+// flushes on 'drain' and never loses one.
+let outQueue = []
+let outPumping = false
 function sendToExt(obj) {
   const json = Buffer.from(JSON.stringify(obj), 'utf8')
   const frame = Buffer.allocUnsafe(4)
   frame.writeUInt32LE(json.length, 0)
   trace({ kind: 'ext<-pipe', msg: obj })
-  if (!stdoutDrained) return
-  stdoutDrained = false
-  process.stdout.write(Buffer.concat([frame, json]), () => { stdoutDrained = true })
+  outQueue.push(Buffer.concat([frame, json]))
+  pumpOut()
+}
+function pumpOut() {
+  if (outPumping) return
+  outPumping = true
+  const step = () => {
+    let buf
+    while ((buf = outQueue.shift()) !== undefined) {
+      if (!process.stdout.write(buf)) {
+        process.stdout.once('drain', step)
+        return
+      }
+    }
+    outPumping = false
+  }
+  step()
 }
 
 // Ext reply id → origin: host server-requests we forwarded (rpcId) vs plugin

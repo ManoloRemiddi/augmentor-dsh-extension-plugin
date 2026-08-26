@@ -81,24 +81,23 @@
   .hbtn { flex: none; display: inline-flex; align-items: center; justify-content: center;
     width: 26px; height: 26px; border: none; border-radius: 6px; background: transparent;
     color: var(--text2); cursor: pointer; padding: 0; }
-  .hbtn:hover { background: var(--hover); color: var(--text); }
+  /* 0.1.18: header icons are FLAT — no hover background, no hover color
+     shift (the earlier rounded hover rectangle was not wanted). State shows
+     in the icon itself (the save star fills), never in a hover tint. */
   .hbtn svg { display: block; }
   /* M3: Save badge — a saved chat reads as "done": the star FILLS in the
      accent (a filled shape, not a hover tint). */
   #save.saved { color: var(--accent, var(--brand)); }
   #save.saved svg { fill: currentColor; }
-  #save.saved:hover { background: var(--layer2); color: var(--accent, var(--brand)); }
   .hicon { flex: none; display: inline-flex; align-items: center; justify-content: center;
     width: 26px; height: 26px; border: none; border-radius: 6px; background: transparent;
     color: var(--text2); cursor: pointer; }
-  .hicon:hover { background: var(--hover); color: var(--text); }
 
   /* Color picker (header hue icon): a rainbow disc. */
   #hue .hue-chip { width: 15px; height: 15px; border-radius: 50%;
     background: conic-gradient(from 90deg, #f43f3f, #f4c23f, #3fc43f, #3fc9f4,
       #3f5ef4, #b43ff4, #f43f3f);
     box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.28); }
-  #hue:hover .hue-chip { box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.45); }
 
   /* Color popover: surface hue / brightness + accent, live preview. */
   #huepop { position: fixed; z-index: 10; width: 236px; padding: 12px;
@@ -247,17 +246,16 @@
   /* Composer dock status strip (GUI parity): approval mode · model · stats. */
   #strip { flex: none; display: flex; gap: 8px; align-items: center; position: relative;
     padding: 5px 12px 7px; background: var(--layer1); border-top: 1px solid var(--border); }
-  /* 0.1.17: the access pill is now the approval-mode control — it reads the
-     DSH permission preset (settings ns "permission") and writes it back, the
-     same knob the DSH GUI's settings row uses. */
-  #access { flex: none; font-size: 10.5px; color: var(--text2); background: var(--layer2);
-    border: 1px solid var(--border); border-radius: 999px; padding: 1.5px 8px;
-    cursor: pointer; font-family: inherit; }
-  #access::after { content: '▾'; font-size: 8px; color: var(--text3); margin-left: 3px; }
-  #access:hover { border-color: var(--border2); color: var(--text); }
-  #access-menu { position: absolute; left: 10px; bottom: calc(100% + 6px); z-index: 30;
-    width: 250px; background: var(--bg); border: 1px solid var(--border2);
+  /* 0.1.18: the access pill is GONE from the strip — the approval mode now
+     lives in a long-press on the New Chat icon (the setting is still the DSH
+     permission preset, ns "permission", defaultPreset; default = Automatic /
+     full access). The menu is fixed-positioned by sidepanel.js under the
+     icon that opened it. */
+  #access-menu { position: fixed; z-index: 40;
+    width: 264px; background: var(--bg); border: 1px solid var(--border2);
     border-radius: 8px; box-shadow: 0 4px 16px rgba(0,0,0,.28); padding: 4px; }
+  .access-head { font-size: 10px; font-weight: 700; color: var(--text3); text-transform:
+    uppercase; letter-spacing: 0.06em; padding: 4px 8px 5px; }
   .access-opt { display: block; width: 100%; text-align: left; background: none; border: none;
     border-radius: 6px; padding: 6px 8px; cursor: pointer; font-family: inherit; }
   .access-opt:hover { background: var(--hover); }
@@ -269,9 +267,12 @@
     font-size: 10.5px; color: var(--text2); background: var(--layer2);
     border: 1px solid var(--border); border-radius: 999px; padding: 1.5px 8px;
     cursor: pointer; font-family: inherit; }
-  /* 0.1.17: the strip has room — let the full model name show (the stats
-     line keeps the rest and ellipsis-truncates, as the lower-priority side). */
-  #model-label { max-width: 55%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  /* 0.1.18: the chip hugs the text. The old `max-width: 55%` was a
+     circular constraint (55% of the chip, whose width came from the same
+     label) — the chip sized to the FULL name while the label truncated to
+     half of it, leaving a dead pill twice as wide as the letters. A fixed
+     cap (240px) only ever trims genuinely long provider/model ids. */
+  #model-label { max-width: 240px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   #model .model-chev { flex: none; color: var(--text3); }
   #model:hover:not(:disabled) { border-color: var(--border2); color: var(--text); }
   #model:hover:not(:disabled) .model-chev { color: var(--text2); }
@@ -359,7 +360,7 @@
     </button>
     <img id="logo" src="favicon.svg" alt="" width="18" height="18">
     <span id="title" title="Double-click to rename">Augmentor</span>
-    <button id="newchat" class="hbtn" title="Start a new session" aria-label="Start a new session">
+    <button id="newchat" class="hbtn" title="Start a new session (hold for approval mode)" aria-label="Start a new session, hold for approval mode">
       <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor"
         stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
         <path d="M3.5 3.5h9a1 1 0 0 1 1 1v5a1 1 0 0 1-1 1H7L4.5 13v-2.5h-1a1 1 0 0 1-1-1v-5a1 1 0 0 1 1-1z" />
@@ -399,7 +400,6 @@
     <button id="stop" hidden title="Stop the current run">■ Stop</button>
   </footer>
   <div id="strip">
-    <button id="access" type="button" title="Approval mode — click to change (applies to new chats)">Full access</button>
     <button id="model" hidden title="Switch model" aria-haspopup="dialog">
       <span id="model-label"></span>
       <svg class="model-chev" width="10" height="10" viewBox="0 0 16 16" fill="none"

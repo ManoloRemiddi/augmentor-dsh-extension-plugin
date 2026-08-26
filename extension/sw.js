@@ -324,13 +324,45 @@ function request(method, params) {
     state.pending.set(id, { method, resolve, reject })
     log('wire', { dir: 'ext->bridge', msg: { id, method, params: summarizeParams(params) } })
     post({ id, method, params })
+    // 0.1.18: 20s, not 60s — a lost response (dead port, dropped frame)
+    // should fail the UI fast enough that the panel's retry can recover it.
     setTimeout(() => {
       if (state.pending.has(id)) {
         state.pending.delete(id)
-        reject(new Error(`${method} timed out (60s)`))
+        reject(new Error(`${method} timed out (20s)`))
       }
-    }, 60000)
+    }, 20000)
   })
+}
+
+// 0.1.18: self-heal for user-initiated reads. The old path returned a stale
+// state.error the moment phase !== 'ready' — and the armed backoff retry could
+// be up to 30s away, or lost entirely to an SW idle-kill (which drops
+// setTimeout). A click that finds the SW not-ready now FORCES a fresh attempt
+// immediately (reset the backoff, clear any armed timer, fresh connectNative)
+// and waits briefly for the handshake, so the user's click lands on a live
+// port instead of a stale "native messaging host" error string. Returns true
+// when phase is 'ready' on return; false means "still not ready" (the caller
+// reports state.error, and the normal backoff continues in the background).
+async function requireReady(timeoutMs = 3500) {
+  if (state.phase === 'ready') return true
+  if (state.phase !== 'connecting') {
+    // 'error' or 'initial': force a fresh attempt NOW, bypassing the backoff.
+    state.retryCount = 0
+    if (reconnectTimer) {
+      clearTimeout(reconnectTimer)
+      reconnectTimer = null
+    }
+    state.error = null
+    ensurePort()
+  }
+  const started = Date.now()
+  while (Date.now() - started < timeoutMs) {
+    if (state.phase === 'ready') return true
+    if (state.phase === 'error') break // fail() re-armed the background backoff
+    await new Promise((r) => setTimeout(r, 150))
+  }
+  return state.phase === 'ready'
 }
 
 function summarize(obj) {
@@ -1203,31 +1235,39 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     // M1: the DSH app's own sessions, straight from the live app through the
     // pipe (POST /api/session.list). Rows carry no title in the base payload;
     // projections.values.title is present when the app named the session.
-    if (state.phase !== 'ready') {
-      sendResponse({ ok: false, error: state.error ?? `not ready (phase: ${state.phase})` })
-      return
-    }
-    request('session.list', {})
-      .then((res) => sendResponse({ ok: true, items: res?.items ?? [] }))
-      .catch((e) => sendResponse({ ok: false, error: e.message }))
+    // 0.1.18: not-ready no longer means "return the stale error" — the click
+    // itself forces a reconnect (requireReady), so a stale SW self-heals
+    // instead of surfacing "Error when communicating with the native
+    // messaging host." from a previous generation.
+    requireReady().then((ok) => {
+      if (!ok) {
+        sendResponse({ ok: false, error: state.error ?? `not ready (phase: ${state.phase})` })
+        return
+      }
+      request('session.list', {})
+        .then((res) => sendResponse({ ok: true, items: res?.items ?? [] }))
+        .catch((e) => sendResponse({ ok: false, error: e.message }))
+    })
     return true // async
   }
   if (msg?.type === 'session/history') {
     // M1: one DSH session's event history for the panel's live-event
     // renderer (the vocabularies match: user/message, assistant/message,
     // tool/call, …). The panel resets its seq baseline before applying.
-    if (state.phase !== 'ready') {
-      sendResponse({ ok: false, error: state.error ?? `not ready (phase: ${state.phase})` })
-      return
-    }
-    const sessionId = String(msg.sessionId ?? '')
-    if (!sessionId) {
-      sendResponse({ ok: false, error: 'missing sessionId' })
-      return
-    }
-    request('session.history', { sessionId, maxMessages: 500 })
-      .then((res) => sendResponse({ ok: true, events: res?.events ?? [], hasMore: res?.hasMore ?? false }))
-      .catch((e) => sendResponse({ ok: false, error: e.message }))
+    requireReady().then((ok) => {
+      if (!ok) {
+        sendResponse({ ok: false, error: state.error ?? `not ready (phase: ${state.phase})` })
+        return
+      }
+      const sessionId = String(msg.sessionId ?? '')
+      if (!sessionId) {
+        sendResponse({ ok: false, error: 'missing sessionId' })
+        return
+      }
+      request('session.history', { sessionId, maxMessages: 500 })
+        .then((res) => sendResponse({ ok: true, events: res?.events ?? [], hasMore: res?.hasMore ?? false }))
+        .catch((e) => sendResponse({ ok: false, error: e.message }))
+    })
     return true // async
   }
   if (msg?.type === 'session/view') {
@@ -1260,36 +1300,40 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     // 0.1.17: the panel reads the permission preset (the "Full access" seat)
     // through the stock DSH settings API — same route the DSH GUI's own
     // settings row uses.
-    if (state.phase !== 'ready') {
-      sendResponse({ ok: false, error: state.error ?? `not ready (phase: ${state.phase})` })
-      return
-    }
-    request('settings.describe', msg.ns ? { ns: msg.ns } : {})
-      .then((res) => sendResponse({ ok: true, value: res ?? null }))
-      .catch((e) => sendResponse({ ok: false, error: e.message }))
+    requireReady().then((ok) => {
+      if (!ok) {
+        sendResponse({ ok: false, error: state.error ?? `not ready (phase: ${state.phase})` })
+        return
+      }
+      request('settings.describe', msg.ns ? { ns: msg.ns } : {})
+        .then((res) => sendResponse({ ok: true, value: res ?? null }))
+        .catch((e) => sendResponse({ ok: false, error: e.message }))
+    })
     return true // async
   }
   if (msg?.type === 'settings/mutate') {
     // 0.1.17: the user switches the permission preset (auto vs manual
     // approval). Applies to subsequently created sessions, per DSH's own
     // settings-store contract.
-    if (state.phase !== 'ready') {
-      sendResponse({ ok: false, error: state.error ?? `not ready (phase: ${state.phase})` })
-      return
-    }
-    const ns = String(msg.ns ?? '')
-    const ops = Array.isArray(msg.ops) ? msg.ops : []
-    if (!ns || ops.length === 0) {
-      sendResponse({ ok: false, error: 'missing ns or ops' })
-      return
-    }
-    request('settings.mutate', {
-      ns,
-      ops,
-      ...(msg.expectedRevision !== undefined ? { expectedRevision: msg.expectedRevision } : {}),
+    requireReady().then((ok) => {
+      if (!ok) {
+        sendResponse({ ok: false, error: state.error ?? `not ready (phase: ${state.phase})` })
+        return
+      }
+      const ns = String(msg.ns ?? '')
+      const ops = Array.isArray(msg.ops) ? msg.ops : []
+      if (!ns || ops.length === 0) {
+        sendResponse({ ok: false, error: 'missing ns or ops' })
+        return
+      }
+      request('settings.mutate', {
+        ns,
+        ops,
+        ...(msg.expectedRevision !== undefined ? { expectedRevision: msg.expectedRevision } : {}),
+      })
+        .then((res) => sendResponse({ ok: true, value: res ?? null }))
+        .catch((e) => sendResponse({ ok: false, error: e.message }))
     })
-      .then((res) => sendResponse({ ok: true, value: res ?? null }))
-      .catch((e) => sendResponse({ ok: false, error: e.message }))
     return true // async
   }
   if (msg?.type === 'fence/probe') {
