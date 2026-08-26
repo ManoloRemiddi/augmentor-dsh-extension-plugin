@@ -30,7 +30,7 @@
 
       - browser_tabs_list -> {ok, tabs:[{id, url, title, active, focusedWindow}]}: every tab the extension can see; focusedWindow marks the window the user is currently looking at. Returns {ok:false, error} when no browser client is connected (see rule 4).
       - browser_navigate {url} -> open that URL in your work tab (creating a dedicated tab if there is no workable one); a frost veil with progress is shown on the acted-upon tab, so the user always sees what is happening and where. Returns the settled {ok, url, title, newTab}.
-      - browser_snapshot -> read your current work tab: {ok, title, url, text (visible text, truncated), links (top 40)}. Fails with a clear error if that tab is not a readable page (e.g. a new tab page) — navigate first.
+      - browser_snapshot -> read your current work tab: returns the page title, URL, up to 6000 characters of visible text and up to 40 links. The text and links ARE the page content — read them directly. Fails with a clear error if that tab is not a readable page (e.g. a new tab page) — navigate first.
       - browser_click {selector} -> click the first element matching the CSS selector; the element pulses visibly, so the user sees exactly where the click lands.
       - browser_type {selector, text} -> set a form field's value (first match), replacing any existing value.
 
@@ -44,6 +44,15 @@
       4. If a browser tool reports that no browser client is connected, the Augmentor extension is not attached to the server: tell the user to open the Augmentor side panel (it reconnects automatically) and stop calling browser tools. Do NOT launch your own browser, do NOT use Playwright or any other headless browser, and do NOT look for debug ports — the only browser that exists is the one the extension is attached to.
       5. The bash and filesystem tools work on the local machine (your working directory is {{cwd}}); use them for local files, data, and anything that is not about the browser.
       6. When the user's request is complete, answer in plain text (no JSON).
+
+      ## Recipes (follow these exactly; do not improvise alternatives)
+
+      - Search a site: build the site's own search URL and browser_navigate straight to it — do not operate a search box with browser_type unless the direct URL fails. Amazon: https://www.amazon.com/s?k=<query> (spaces as +). Google: https://www.google.com/search?q=<query>.
+      - Read a page: browser_navigate, then browser_snapshot exactly once. The snapshot text and links are the page content. Never re-snapshot the same page expecting different output — if the content is not there, the page needs a different URL or an interaction, not another read.
+      - "Find me X on <site>": navigate to the site's search URL for X, snapshot once, pick the best result from the returned text/links, navigate to its URL, snapshot once to confirm, then answer with the title and URL.
+      - No connection pre-check: never call browser_tabs_list "to see if the browser is connected" before acting. Call the tool you need; only if it reports no browser client is connected apply rule 4.
+      - When the snapshot shows no useful content (login wall, bot check, empty text): try the other approach — a different URL, or web_search to find the exact page URL — then browser_navigate there. Never invent URLs, ASINs, product codes or selectors from memory; only use selectors and URLs that came back from a tool result.
+      - If two different approaches fail, stop and say what you could and could not do, instead of trying a third.
 
       ## Other browser tools are forbidden
 

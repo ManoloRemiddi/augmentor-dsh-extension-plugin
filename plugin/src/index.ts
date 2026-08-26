@@ -560,9 +560,11 @@ export function apply(ctx: Context, config: Config) {
           error: { type: 'string' },
         },
       },
-      render: (_args, value) => [
-        { type: 'text', text: value.ok ? `${value.tabs.length} tab(s) open in the user's browser` : value.error ?? 'no tabs' },
-      ],
+      render: (_args, value) => {
+        if (!value.ok) return [{ type: 'text', text: value.error ?? 'no tabs' }]
+        if (!value.tabs.length) return [{ type: 'text', text: '0 tabs open in the user\'s browser' }]
+        return [{ type: 'text', text: value.tabs.map((t) => `tab ${t.id ?? '?'}${t.active ? ' [active]' : ''}${t.focusedWindow ? ' [focused window]' : ''}: ${t.title ?? '(untitled)'} — ${t.url ?? '(no url yet)'}`).join('\n') }]
+      },
     },
     async execute(_args, exec) {
       if (exec.signal.aborted) throw new Error('cancelled')
@@ -644,9 +646,15 @@ export function apply(ctx: Context, config: Config) {
           error: { type: 'string' },
         },
       },
-      render: (_args, value) => [
-        { type: 'text', text: value.ok ? `Page ${value.title ?? ''} (${value.url ?? 'unknown'}) \u2014 ${(value.text ?? '').length} chars, ${value.links?.length ?? 0} link(s)` : `snapshot failed: ${value.error ?? 'unknown error'}` },
-      ],
+      render: (_args, value) => {
+        if (!value.ok) return [{ type: 'text', text: `snapshot failed: ${value.error ?? 'unknown error'}` }]
+        const parts = [`Page: ${value.title}`, `URL: ${value.url}`, '', value.text || '(no visible text)']
+        if (value.links?.length) {
+          parts.push('', `Links (${value.links.length}):`)
+          for (const l of value.links) parts.push(`- [${l.text}](${l.href})`)
+        }
+        return [{ type: 'text', text: parts.join('\n') }]
+      },
     },
     async execute(_args, exec) {
       if (exec.signal.aborted) throw new Error('cancelled')
