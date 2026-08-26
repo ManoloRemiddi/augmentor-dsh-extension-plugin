@@ -287,7 +287,15 @@ export function createChatUI(els) {
   }
 
   function renderAssistantNow() {
-    if (!textEl) return
+    if (!textEl) {
+      // 0.1.23: history replay has no streamed chunks (the pipe strips
+      // assistant/chunk), so nothing else creates the text element —
+      // materialize it here whenever there is finalized text to paint.
+      // Without this, opened sessions showed only thinking + tool rows and
+      // the assistant's prose silently vanished.
+      if (!assistantRaw) return
+      ensureTextEl()
+    }
     textEl.innerHTML = md(assistantRaw)
     // Caret on the live tail while this step is streaming (GUI parity:
     // MarkdownText shows a caret on the streaming block).
@@ -475,6 +483,10 @@ export function createChatUI(els) {
             // Final message is authoritative; adopt it whenever the streamed
             // text is absent or differs (covers providers without chunks).
             if (assistantRaw.trim() !== text.trim()) assistantRaw = text
+            // 0.1.23: create the text element up front on history replay (no
+            // streamed text-delta will) so the reasoning block lands BEFORE
+            // the prose and the copy action after it.
+            ensureTextEl()
             // GUI parity: the turn tail exposes a copy action for the
             // finalized message's prose (assistantText: text blocks joined).
             const copyText = (msg.content ?? [])

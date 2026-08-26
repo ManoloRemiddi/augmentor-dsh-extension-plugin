@@ -239,7 +239,20 @@ if (browse.footers.some((f) => /^Latest \d+ of \d+ sessions$/.test(f))) {
   process.stderr.write(`[m3] BROWSE: cap footer present (${browse.footers.join(' | ')})\n`)
 }
 process.stderr.write(`[m3] BROWSE: popover rendered ${browse.rows} session rows, no error strip\n`)
-await ev('document.getElementById("sessions").click()') // close again
+// 0.1.23: reopen the CURRENT session through the history path and assert the
+// assistant's PROSE renders (the pipe strips assistant/chunk, so the final
+// assistant/message must paint the text — the failure was "thinking + tool
+// rows only, no output").
+await ev('(() => { const r = document.querySelector("#sessionspop .sp-row"); if (r) r.click() })()')
+let replayText = ''
+for (let i = 0; i < 24; i++) {
+  await sleep(500)
+  replayText = await ev('[...document.querySelectorAll("#log .msg.assistant .md")].map((n) => n.textContent || "").join("\\n")')
+  if (replayText.includes('M3 OK')) break
+}
+if (!replayText.includes('M3 OK')) fail('history replay rendered no assistant prose (thinking/tool rows only?)', { replayText: replayText.slice(0, 400) })
+process.stderr.write(`[m3] BROWSE: history replay rendered assistant prose (${replayText.trim().length} chars incl. "M3 OK")\n`)
+await ev('(() => { const pop = document.getElementById("sessionspop"); if (!pop.hidden) document.getElementById("sessions").click() })()') // close if still open
 
 // ---------- 7. #openindsh -> new target at the app endpoint (Option A) ----------
 const targetsBefore = new Set((await jfetch('/json')).map((t) => t.url))

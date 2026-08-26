@@ -1246,3 +1246,33 @@ Per user request: the Browse popover now shows only the **latest 20 sessions**
 - m3-e2e: asserts rows ≤ 20 and (when the list exceeds 20) that the cap
   footer text is present. Real-env e2e green: 20 rows + footer, no error
   strip.
+
+### 15.8 — v0.1.23: opened sessions showed thinking + tool rows but no assistant prose (2026-08-26)
+
+User report: opening an older session in the panel loaded it "like an action
+list" — thinking and browser actions visible, the assistant's readable output
+missing.
+
+Root cause (render path, not data): the persisted history **does** contain the
+final `assistant/message` events with proper `{type:'text', text}` blocks
+(verified against real session.jsonl dumps). The pipe's `shapeHistory` strips
+`assistant/chunk` events (by design — they're the streaming deltas). In live
+chat the deltas' `text-delta` handler calls `ensureTextEl()`, which creates
+the prose element. In **history replay no chunks exist**, so `textEl` stayed
+`null` — and `renderAssistantNow()` starts with `if (!textEl) return`:
+finalized prose had nowhere to be painted. The block kept only the copy
+action (or was removed when it had no thinking either), while thinking
+blocks and tool rows build their own elements and rendered fine — exactly
+the reported symptom.
+
+Fix (chat-render.js):
+1. `renderAssistantNow()` now materializes the text element itself whenever
+   there is finalized text to paint (root fix, covers any future path that
+   reaches a final message without streamed deltas).
+2. The `assistant/message` text branch calls `ensureTextEl()` up front so
+   the reasoning block inserts before the prose and the copy action after
+   it (correct visual order on replay).
+
+m3-e2e: after the Browse row assertions it reopens the current session
+through the history path and asserts the assistant prose ("M3 OK") is
+actually rendered — the exact regression for this bug. Real-env e2e green.
