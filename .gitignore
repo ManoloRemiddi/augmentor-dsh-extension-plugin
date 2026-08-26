@@ -16,3 +16,6 @@ agent-workdir/
 
 # Node deps (root + plugin/)
 node_modules/
+
+# local site — not part of the extension
+website/
