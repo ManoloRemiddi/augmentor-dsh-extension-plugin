@@ -1245,7 +1245,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
         return
       }
       request('session.list', {})
-        .then((res) => sendResponse({ ok: true, items: res?.items ?? [] }))
+        .then((res) => sendResponse({ ok: true, items: res?.items ?? [], total: res?.total }))
         .catch((e) => sendResponse({ ok: false, error: e.message }))
     })
     return true // async

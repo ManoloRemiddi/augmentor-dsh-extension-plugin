@@ -1229,3 +1229,20 @@ Also in 0.1.21: the "(M1)" dropped from the Browse button tooltip; m3-e2e now
 clicks `#sessions` for real and asserts rows render with no error strip
 (regression guard for this exact failure). Real-env e2e green: Browse renders
 70 rows.
+
+### 15.7 — v0.1.22: session list capped at the latest 20 (2026-08-26)
+
+Per user request: the Browse popover now shows only the **latest 20 sessions**
+(by `updatedAt`, newest first), so the list can never grow back toward the
+1 MiB wire limit by accumulation — 20 slim rows are ~3.6 KB.
+
+- pipe: `shapeSessionList` sorts by recency and slices to `LIST_MAX_ROWS = 20`;
+  the 850 KB budget remains as an outermost safety (pathological titles).
+- wire: the shaped list carries `total` (full count); the SW passes it
+  through; the panel appends a `Latest 20 of 71 sessions` footer so the cap
+  is visible instead of silently hiding older sessions (older sessions are
+  not deleted — they're just not listed; the DSH app's own UI still shows all
+  of them).
+- m3-e2e: asserts rows ≤ 20 and (when the list exceeds 20) that the cap
+  footer text is present. Real-env e2e green: 20 rows + footer, no error
+  strip.

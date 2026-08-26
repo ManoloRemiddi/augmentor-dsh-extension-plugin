@@ -350,6 +350,14 @@ sessionsBtn.addEventListener('click', async (e) => {
     return
   }
   renderSessionsList(res.items)
+  // 0.1.22: the pipe ships only the latest N rows (LIST_MAX_ROWS) — make the
+  // cap visible instead of letting older sessions look vanished.
+  if (typeof res.total === 'number' && res.total > res.items.length) {
+    const foot = document.createElement('div')
+    foot.className = 'sp-strip'
+    foot.textContent = `Latest ${res.items.length} of ${res.total} sessions`
+    sessionsPopBody.appendChild(foot)
+  }
 })
 document.addEventListener('mousedown', (e) => {
   if (!sessionsPop.hidden && !sessionsPop.contains(e.target) && !sessionsBtn.contains(e.target)) closeSessionsPop()

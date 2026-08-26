@@ -221,7 +221,7 @@ await ev('document.getElementById("sessions").click()')
 let browse = null
 for (let i = 0; i < 24; i++) {
   await sleep(500)
-  browse = await ev('(() => { const pop = document.getElementById("sessionspop"); if (pop.hidden) return null; const err = pop.querySelector(".sp-strip.err"); return { err: err ? err.textContent : null, rows: pop.querySelectorAll(".sp-row").length } })()')
+  browse = await ev('(() => { const pop = document.getElementById("sessionspop"); if (pop.hidden) return null; const err = pop.querySelector(".sp-strip.err"); const strips = [...pop.querySelectorAll(".sp-strip:not(.err)")].map((s) => s.textContent); return { err: err ? err.textContent : null, rows: pop.querySelectorAll(".sp-row").length, footers: strips } })()')
   if (browse && browse.err === null && browse.rows > 0) break
   if (browse && browse.err) break
 }
@@ -233,6 +233,11 @@ process.stderr.write(`[m3] DIRECT SW ROUND-TRIP: ${JSON.stringify(direct).slice(
 if (!browse) fail('browse popover did not open')
 if (browse.err) fail('browse surfaced an error strip (native host?)', browse)
 if (browse.rows < 1) fail('browse rendered no rows', browse)
+// 0.1.22 contract: the pipe caps the list at the latest 20 rows.
+if (browse.rows > 20) fail('browse exceeded the 20-row cap', browse)
+if (browse.footers.some((f) => /^Latest \d+ of \d+ sessions$/.test(f))) {
+  process.stderr.write(`[m3] BROWSE: cap footer present (${browse.footers.join(' | ')})\n`)
+}
 process.stderr.write(`[m3] BROWSE: popover rendered ${browse.rows} session rows, no error strip\n`)
 await ev('document.getElementById("sessions").click()') // close again
 

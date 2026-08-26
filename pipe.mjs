@@ -473,8 +473,13 @@ function shapeHistory(value) {
 // blew past the 1 MiB native-messaging limit and made Chrome KILL the host
 // connection (surfacing as "Error when communicating with the native
 // messaging host." on every Browse click). The panel renders exactly five
-// fields per row, so the pipe ships the slim shape:
-const LIST_BUDGET = 850 * 1024 // well under the 1 MiB wire limit
+// fields per row, so the pipe ships the slim shape — and, per the user's
+// call, only the LATEST LIST_MAX_ROWS rows (newest by updatedAt): 20 slim
+// rows are ~4 KB, so the frame can never approach the wire limit by
+// accumulation. `total` carries the full count so the panel can show
+// "Latest 20 of 67" instead of silently hiding older sessions:
+const LIST_MAX_ROWS = 20
+const LIST_BUDGET = 850 * 1024 // outermost safety, should never trigger now
 function shapeSessionList(value) {
   const items = value?.items
   if (!Array.isArray(items) || !items.length) return value
@@ -485,15 +490,16 @@ function shapeSessionList(value) {
     updatedAt: i.updatedAt ?? null,
     ...(i.projections?.values?.title ? { projections: { values: { title: i.projections.values.title } } } : {}),
   })
-  let out = { ...value, items: items.map(slim) }
+  const sorted = [...items].sort((a, b) => (b.updatedAt ?? 0) - (a.updatedAt ?? 0))
+  const kept = sorted.slice(0, LIST_MAX_ROWS)
+  let out = { ...value, items: kept.map(slim), total: items.length }
   if (JSON.stringify(out).length > LIST_BUDGET) {
-    // Still too big: keep the most-recent rows that fit (newest first).
-    const sorted = [...items].sort((a, b) => (b.updatedAt ?? 0) - (a.updatedAt ?? 0))
-    let kept = sorted
-    while (kept.length > 1 && JSON.stringify({ ...out, items: kept.map(slim) }).length > LIST_BUDGET) {
-      kept = kept.slice(0, Math.max(1, Math.floor(kept.length * 0.7)))
+    // Pathological (e.g. gigantic titles): keep the newest rows that fit.
+    let k = kept
+    while (k.length > 1 && JSON.stringify({ ...out, items: k.map(slim) }).length > LIST_BUDGET) {
+      k = k.slice(0, Math.max(1, Math.floor(k.length * 0.7)))
     }
-    out = { ...value, items: kept.map(slim), truncatedEarlier: items.length - kept.length }
+    out = { ...value, items: k.map(slim), total: items.length, truncatedEarlier: items.length - k.length }
   }
   return out
 }
