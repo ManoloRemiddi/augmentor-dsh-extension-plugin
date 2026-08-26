@@ -212,6 +212,30 @@ if (!row) fail('workspace vanished after unsave', row)
 if ((row.sessionIds ?? []).includes(SID)) fail('session still attached after unsave', row)
 process.stderr.write('[m3] UNSAVE: badge cleared + detach confirmed (workspace survives)\n')
 
+// ---------- 6b. Click #sessions -> Browse renders the DSH session list ----------
+// 0.1.20: the user's exact action that used to dead-end with "Error when
+// communicating with the native messaging host." — assert real rows render
+// and no error strip appears (this also exercises the panel's one-shot
+// auto-retry if the SW is momentarily not ready).
+await ev('document.getElementById("sessions").click()')
+let browse = null
+for (let i = 0; i < 24; i++) {
+  await sleep(500)
+  browse = await ev('(() => { const pop = document.getElementById("sessionspop"); if (pop.hidden) return null; const err = pop.querySelector(".sp-strip.err"); return { err: err ? err.textContent : null, rows: pop.querySelectorAll(".sp-row").length } })()')
+  if (browse && browse.err === null && browse.rows > 0) break
+  if (browse && browse.err) break
+}
+process.stderr.write(`[m3] BROWSE STATE: ${JSON.stringify(browse)}\n`)
+// Direct SW round-trip (callback form exposes chrome.runtime.lastError):
+// tells us whether the SW answers at all, and with what.
+const direct = await ev('new Promise((res) => { try { chrome.runtime.sendMessage({ type: "session/list" }, (r) => { const e = chrome.runtime.lastError; res({ r, lastError: e ? e.message : null }) }) } catch (e) { res({ threw: e.message }) } })')
+process.stderr.write(`[m3] DIRECT SW ROUND-TRIP: ${JSON.stringify(direct).slice(0, 600)}\n`)
+if (!browse) fail('browse popover did not open')
+if (browse.err) fail('browse surfaced an error strip (native host?)', browse)
+if (browse.rows < 1) fail('browse rendered no rows', browse)
+process.stderr.write(`[m3] BROWSE: popover rendered ${browse.rows} session rows, no error strip\n`)
+await ev('document.getElementById("sessions").click()') // close again
+
 // ---------- 7. #openindsh -> new target at the app endpoint (Option A) ----------
 const targetsBefore = new Set((await jfetch('/json')).map((t) => t.url))
 await ev('document.getElementById("openindsh").click()')
@@ -238,10 +262,11 @@ console.log(JSON.stringify({
   session: { id: SID, cwd: CHATDIR },
   save: { badge: 'filled accent star (saved)', attachedInWorkspaceList: true },
   unsave: { badge: 'star outline (unsaved)', detachedInWorkspaceList: true },
+  browse: { rows: browse.rows, error: browse.err ?? null },
   openInDsh: opened.url,
   cleanup: { archived: true },
 }, null, 1))
-console.error('M3-E2E: OK — panel Save/Unsave/Open-in-DSH works in real Chrome against the live deployment')
+console.error('M3-E2E: OK — panel Browse/Save/Unsave/Open-in-DSH works in real Chrome against the live deployment')
 bws.close(); pws.close()
 chromium.kill()
 process.exit(0)

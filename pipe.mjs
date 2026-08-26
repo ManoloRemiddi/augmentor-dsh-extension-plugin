@@ -177,13 +177,31 @@ async function dshRespond(rpcId, extMsg) {
 // flushes on 'drain' and never loses one.
 let outQueue = []
 let outPumping = false
-function sendToExt(obj) {
+// 0.1.21: Chrome's native-messaging channel caps host→extension messages at
+// 1 MiB. A bigger frame doesn't error — Chrome KILLS the connection and the
+// extension only sees "Error when communicating with the native messaging
+// host." (the exact dead-end behind the M1 Browse failure: the session list
+// payload was 4.7 MB). Never emit an oversized frame: a request gets a small
+// readable error frame instead; a push frame is dropped (logged).
+const NMH_FRAME_MAX = 1024 * 1024
+function pushFrame(obj) {
   const json = Buffer.from(JSON.stringify(obj), 'utf8')
   const frame = Buffer.allocUnsafe(4)
   frame.writeUInt32LE(json.length, 0)
   trace({ kind: 'ext<-pipe', msg: obj })
   outQueue.push(Buffer.concat([frame, json]))
   pumpOut()
+}
+function sendToExt(obj) {
+  const json = Buffer.from(JSON.stringify(obj), 'utf8')
+  if (json.length + 4 > NMH_FRAME_MAX) {
+    log('oversized frame suppressed', obj.id ?? obj.method ?? '?', `${json.length} bytes (>1 MiB)`)
+    if (obj.id !== undefined) {
+      pushFrame({ id: obj.id, error: { message: 'response exceeds the 1 MiB native-messaging channel limit' } })
+    }
+    return
+  }
+  pushFrame(obj)
 }
 function pumpOut() {
   if (outPumping) return
@@ -450,6 +468,36 @@ function shapeHistory(value) {
   return out
 }
 
+// 0.1.21: the raw /api/session.list payload grows with the user's session
+// history (projections, usage stats) — it hit 4.7 MB on this machine, which
+// blew past the 1 MiB native-messaging limit and made Chrome KILL the host
+// connection (surfacing as "Error when communicating with the native
+// messaging host." on every Browse click). The panel renders exactly five
+// fields per row, so the pipe ships the slim shape:
+const LIST_BUDGET = 850 * 1024 // well under the 1 MiB wire limit
+function shapeSessionList(value) {
+  const items = value?.items
+  if (!Array.isArray(items) || !items.length) return value
+  const slim = (i) => ({
+    sessionId: i.sessionId,
+    cwd: i.cwd ?? null,
+    running: !!i.running,
+    updatedAt: i.updatedAt ?? null,
+    ...(i.projections?.values?.title ? { projections: { values: { title: i.projections.values.title } } } : {}),
+  })
+  let out = { ...value, items: items.map(slim) }
+  if (JSON.stringify(out).length > LIST_BUDGET) {
+    // Still too big: keep the most-recent rows that fit (newest first).
+    const sorted = [...items].sort((a, b) => (b.updatedAt ?? 0) - (a.updatedAt ?? 0))
+    let kept = sorted
+    while (kept.length > 1 && JSON.stringify({ ...out, items: kept.map(slim) }).length > LIST_BUDGET) {
+      kept = kept.slice(0, Math.max(1, Math.floor(kept.length * 0.7)))
+    }
+    out = { ...value, items: kept.map(slim), truncatedEarlier: items.length - kept.length }
+  }
+  return out
+}
+
 let stdinBuf = Buffer.alloc(0)
 async function handleExtMessage(msg) {
   trace({ kind: 'ext->pipe', msg })
@@ -487,6 +535,10 @@ async function handleExtMessage(msg) {
     if (msg.method === 'session.history') {
       value = shapeHistory(value)
       if (value.truncatedEarlier) log('history shaped', { truncatedEarlier: value.truncatedEarlier })
+    }
+    if (msg.method === 'session.list') {
+      value = shapeSessionList(value)
+      if (value.truncatedEarlier) log('list shaped', { truncatedEarlier: value.truncatedEarlier })
     }
     sendToExt({ id, result: value })
   } catch (e) {

@@ -1194,3 +1194,38 @@ Two follow-ups from the 0.1.18 review:
    sessions, expand, color.
 
 `panel-e2e` green at 0.1.19.
+
+### 15.6 — v0.1.21: the Browse dead-end's real root cause (1 MiB NMH frame limit) (2026-08-26)
+
+The user's persistent "Error when communicating with the native messaging
+host." on Browse was **not** the frame-drop or stale-error issues fixed in
+0.1.18 — those fixes are still valid, but this was a third, deeper cause:
+
+- `/api/session.list` returns a payload that grows with the user's session
+  history (projections/usage per session): **4,725,915 bytes** on this
+  machine (67 sessions; the single largest item was 531 KB).
+- Chrome's native-messaging channel caps host→extension messages at **1 MiB**.
+  An oversized frame doesn't produce an error — **Chrome kills the host
+  connection** and the extension only ever sees
+  "Error when communicating with the native messaging host." (that string is
+  Chrome's generic lastError for a dead native connection).
+- Forensics: in a real-env e2e, the pipe received `session.list`, fetched the
+  4.7 MB response, and the port was dead 150–160 ms later (the frame write
+  tripped the limit). The SW's `fail()` then rejected the pending waiter with
+  exactly that string, which the panel's retry surfaced as the strip.
+- It got "suddenly" broken because the payload crossed 1 MiB as sessions
+  accumulated; earlier Browse runs (small lists) were fine.
+
+Fix (pipe.mjs):
+1. **`shapeSessionList`** — the panel renders exactly five fields per row
+   (sessionId, cwd, running, updatedAt, projections.values.title), so the pipe
+   now ships the slim shape: 4,725,915 → 12,371 bytes (382×), all 67 rows,
+   with an 850 KB budget + newest-first fallback like `shapeHistory`.
+2. **Hard 1 MiB guard in `sendToExt`** — any future oversized frame degrades
+   to a small readable error frame (request) or a logged drop (push) instead
+   of letting Chrome kill the connection.
+
+Also in 0.1.21: the "(M1)" dropped from the Browse button tooltip; m3-e2e now
+clicks `#sessions` for real and asserts rows render with no error strip
+(regression guard for this exact failure). Real-env e2e green: Browse renders
+70 rows.
