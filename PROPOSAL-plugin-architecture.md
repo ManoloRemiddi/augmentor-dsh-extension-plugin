@@ -1010,3 +1010,23 @@ blue/green/yellow/pink at +15 → #000; black at −15 → #fff.
 it now sits in a faint accent wash — `--brand-soft` (brand at 16% alpha,
 emitted by `panelTheme`, so it follows hue + brightness + theme) with
 10px radius. Noticeable without shouting, per the ask.
+
+### 15.1 — The top strip is Chromium's, not the panel's (0.1.15)
+
+User feedback (screenshot, 2026-08-25): the "Augmentor powered by DSH" text
+at the very top of the panel was the intended edit target, and the new brand
+element in the header read as an unwanted duplicate. Source-traced through
+Chromium (`side_panel_header_controller.cc` / `side_panel_util.cc`): the
+olive strip above the panel is the browser's **native side-panel header** —
+a `views::Label` on the toolbar colour plus the panel's pin + close
+controls, titled from the extension's own identity (manifest name / action
+text) and badged with the extension icon. An extension cannot make that
+label a link or apply bold/italic to it — the only controllable aspect is
+the plain text.
+
+Resolution: the strip's text was shortened to just **Augmentor** (manifest
+`name` and the page `<title>` — whichever the build sources it from now
+say the same thing), so the strip reads as a plain app title, and the full
+*Augmentor powered by DSH* bold+italic brand — the only place it can be
+styled and linked — lives in the header row directly below it. No
+duplicated text; the requested design is intact where the platform allows.
