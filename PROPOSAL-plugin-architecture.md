@@ -1514,5 +1514,14 @@ leading ratio 0.920, 0 console errors, ASCII pixel-render of the gradient
 region shows legible glyphs with background gaps (vs. solid block before);
 live 200, css v8 byte-exact (33142 B).
 
+Site b2441bf (hero image top-align): per user, the panel screenshot
+(assets/shot-panel.png in the device frame) had to move up, aligned with
+the top of the left text column. `.hero-split` grid: align-items center →
+start (the frame is the first content of the visual column, so the grid
+item's top = frame top). One property, no markup change; mobile is
+1-column with the visual ordered first, unaffected. Verified: playwright
+at 1280px — text column top 120px, frame top 120px, delta 0, 0 console
+errors; live 200, css v9 byte-exact (33141 B).
+
 Note: `augmentor/README.md` (product repo) is badly stale (M0 sidecar, local
 DSH clone, `session/interrupt` patches) — not part of this pass.
