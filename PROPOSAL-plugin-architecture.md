@@ -1523,5 +1523,39 @@ item's top = frame top). One property, no markup change; mobile is
 at 1280px — text column top 120px, frame top 120px, delta 0, 0 console
 errors; live 200, css v9 byte-exact (33141 B).
 
+Site 1ca3630 (footer social links): user asked earlier for Discord /
+YouTube / GitHub icons + links in the footer of both pages. Official
+simple-icons single-path glyphs (fetched from the simple-icons repo,
+viewBox 0 0 24 24), inlined per link: `.footer-social` nav between the
+tag line and the legal line — 42×42 glass tiles (glass-bg/glass-border
+tokens), 20px icons in currentColor, hover = brand colour (Discord
+#5865f2, YouTube #ff0033, GitHub #f4f4f5) + 3px lift + soft glow,
+aria-labels + titles, target=_blank rel=noopener, reduced-motion aware.
+Links: https://discord.gg/MRESQnf4R4,
+https://www.youtube.com/@manolo.remiddi,
+https://github.com/ManoloRemiddi/augmentor-dsh-extension-plugin (per user:
+the project repo, "public readme" — CAVEAT: repo is currently PRIVATE,
+page returns 404 anonymously; user to flip it public or confirm a
+different URL, one-line href change if needed). CSS v11, bumped in both
+pages (first bump attempt used the wrong base version v10→v11, corrected
+v9→v11). Verified: playwright — 3 links per page, correct hrefs/aria,
+0 console errors, ASCII pixel-render of the icon strip shows the three
+distinct brand glyphs (discord eyes, youtube rect, octocat); live 200,
+css v11 byte-exact (34280 B).
+
+Context from user (growth goal, 2026-08-27): make the DSH plugin +
+extension viral so the plugin is adopted and the author's profile gets
+known in the DSH community. User's own research summary: DSH expects
+plugins as bundle packages (package.json with dsh.bundle patch field,
+cordis.patch.yml, entry module exporting apply(ctx)) published on npm;
+discoverability via `dsh-plugin` npm keyword + GitHub topic; registries
+(dshplugin/dev, DSH plugin directory, awesome-deepseek-harness style
+lists) auto-index those and rank by repo signals (stars, activity,
+license); no formal "built-in" pipeline — traction + maintainer
+recommendation is the path; recommended moves: proper npm publish,
+polished README with exact install command, DSH Discord + GitHub
+Discussions posts with a "why this exists" narrative, realistic YouTube
+walkthrough, directory listings.
+
 Note: `augmentor/README.md` (product repo) is badly stale (M0 sidecar, local
 DSH clone, `session/interrupt` patches) — not part of this pass.
