@@ -37,7 +37,10 @@ const PORT = Number(process.env.SSHOTS_PORT ?? 9227)
 const PROFILE = process.env.SSHOTS_PROFILE ?? '/tmp/chrome-shots-profile'
 const BASE = process.env.DSH_BASE ?? 'http://127.0.0.1:3080'
 const CHATDIR = path.join(os.homedir(), 'Augmentor')
-const PROMPT = 'Extract the most important points from https://augmentatism.com/'
+// needle-in-the-haystack: 7 principles buried in a 3.5k-word manifesto —
+// slow to find by hand, one snapshot for the agent; the "two sentences max"
+// keeps prompt + answer on one 420x800 panel page.
+const PROMPT = 'Count the principles of the Social Contract on this page. Which one is called the "ethical floor"? Two sentences max.'
 const fail = (m) => { console.error('SHOTS FAIL:', m); try { chromium?.kill() } catch {} ; process.exit(1) }
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 
@@ -179,16 +182,15 @@ await W.shot('shot-veil.png', 1280, 800)
 process.stderr.write('[shots] VEIL: captured mid-turn frost + status pill\n')
 
 // ---------- 4. Panel shot: settled conversation ----------
-// extraction reply: substantive prose about Augmentatism; accept a
-// case-insensitive "augment" mention plus a non-trivial length, then let
-// streaming settle (send button reappears).
+// needle reply: should name the count (seven/7) AND "Anti-Capture" as the
+// ethical floor, in ~two sentences.
 let reply = ''
-for (let i = 0; i < 300; i++) {
+for (let i = 0; i < 180; i++) {
   await sleep(1000)
   reply = (await P.ev('[...document.querySelectorAll("#log .msg.assistant .md")].map((n) => n.textContent || "").join("\\n")').catch(() => '')) || ''
-  if (/augment/i.test(reply) && reply.length >= 80) break
+  if (/(seven|7\b)/i.test(reply) && /anti.?capture/i.test(reply) && reply.length >= 40) break
 }
-if (!/augment/i.test(reply) || reply.length < 80) fail('assistant reply looks wrong', reply.slice(0, 200))
+if (!/(seven|7\b)/i.test(reply) || !/anti.?capture/i.test(reply) || reply.length < 40) fail('assistant reply looks wrong', reply.slice(0, 300))
 let settled = false
 for (let i = 0; i < 60; i++) { await sleep(1000); if (await P.ev('!document.getElementById("send").hidden').catch(() => false)) { settled = true; break } }
 await sleep(800) // last paint, caret settled

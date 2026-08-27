@@ -1372,24 +1372,36 @@ v0.1.25 badge on the CTA caption, README package name. Mirror
 `lab/site-shots.mjs` (new): real-Chromium screenshot harness, m3-e2e pattern —
 headless Chromium (profile /tmp/chrome-shots-profile, port 9227,
 `--load-extension` + NMH manifest copied from ~/.config/chromium), drives the
-side panel with a probe prompt (now "Extract the most important points from
-https://augmentatism.com/" — the site's own manifesto, per user request;
-originally example.com), waits for (a) the veil overlay `#__dshAugOverlay`
-canvas on the driven tab → `assets/shot-veil.png` (1280×800 @2x) and (b) the
-panel assistant reply (case-insensitive "augment", ≥80 chars) + settled send
-button →
+side panel with a probe prompt (now the needle question "Count the principles
+of the Social Contract on this page. Which one is called the 'ethical floor'?
+Two sentences max." on the site's own manifesto, augmentatism.com; previously
+"Extract the most important points …", originally example.com), waits for
+(a) the veil overlay `#__dshAugOverlay` canvas on the driven tab →
+`assets/shot-veil.png` (1280×800 @2x) and (b) the panel assistant reply
+(name the count + "Anti-Capture", ≥40 chars) + settled send button →
 `assets/shot-panel.png` (420×800 @2x, matching the CSS aspect ratio).
 Self-archives the probe session and asserts the archive. Verified without a
 vision model: PNG dimensions/bytes + the harness's DOM assertions
 (describe_image's vision backend is misconfigured in this environment).
 
-Re-shoot (site commit 8b03f75): the extraction turn measured 146.9s
-(sessionStats: llmMs 145218 + toolMs 1727, 7 steps, 3380 decode tokens,
-Qwen3.8-27B-UD-Q6_K_XL local) → site stats caption now "2m 27s". The model
-hit the 6000-char `browser_snapshot` cap on the 3.5k-word manifesto and
-completed the read with a curl fetch — the panel shot shows that real agentic
-behaviour, and the IN ACTION mock's agent answer is condensed from the actual
-reply.
+Probe design (per user, v3): the panel shot must show a SHORT prompt and a
+SHORT answer on one 420×800 page, for a task that is slow for a human but
+instant for the agent. The needle — count the 7 Social Contract principles
+and name the "ethical floor" — is buried in a 3,500-word manifesto; all 7
+principle names sit inside the first 6000-char `browser_snapshot`, so the
+agent answers from a single snapshot (no fetch needed). Real reply (104
+chars, two sentences): "There are 7 principles in the Social Contract. The
+'Law of Anti-Capture' is called the 'ethical floor'." Measured 17.5s
+prompt-to-idle (sessionStats: llmMs 17461 + toolMs 12, 2 steps, 368 decode
+tokens, Qwen3.8-27B-UD-Q6_K_XL local). The site's IN ACTION mock, hero alt
+and stats caption are copied from this actual session.
+
+History: v2's extraction prompt ("Extract the most important points from
+https://augmentatism.com/") measured 146.9s (7 steps, 3380 tokens) and the
+model hit the 6000-char snapshot cap, completing the read with a curl fetch —
+good agentic behaviour, but the long answer overflowed the panel page, so the
+shot was re-taken with the v3 needle prompt (site commit 8984bed; v2 was
+8b03f75).
 
 Note: `augmentor/README.md` (product repo) is badly stale (M0 sidecar, local
 DSH clone, `session/interrupt` patches) — not part of this pass.
