@@ -7,11 +7,12 @@
  * gets today, so this drives the actual side panel (not a mock):
  *   1. fresh profile + --load-extension + the host manifest (m3-e2e pattern;
  *      the user's browser is never touched),
- *   2. open the side panel + an https://example.com tab (the tab the user
- *      is "looking at" — it is activated),
- *   3. send one prompt: "Open example.com and tell me the exact title.",
+ *   2. open the side panel + an https://augmentatism.com/ tab (the tab the
+ *      user is "looking at" — it is activated),
+ *   3. send one prompt: "Extract the most important points from
+ *      https://augmentatism.com/",
  *   4. capture shot-veil.png  — mid-turn: the frost veil + status pill on
- *      the example.com tab,
+ *      the augmentatism.com tab,
  *   5. capture shot-panel.png — after the turn: the settled conversation
  *      (420x800, the site's .shot-panel aspect ratio),
  *   6. archive the probe session (sweep's end state).
@@ -36,7 +37,7 @@ const PORT = Number(process.env.SSHOTS_PORT ?? 9227)
 const PROFILE = process.env.SSHOTS_PROFILE ?? '/tmp/chrome-shots-profile'
 const BASE = process.env.DSH_BASE ?? 'http://127.0.0.1:3080'
 const CHATDIR = path.join(os.homedir(), 'Augmentor')
-const PROMPT = 'Open example.com and tell me the exact title.'
+const PROMPT = 'Extract the most important points from https://augmentatism.com/'
 const fail = (m) => { console.error('SHOTS FAIL:', m); try { chromium?.kill() } catch {} ; process.exit(1) }
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 
@@ -95,20 +96,20 @@ const bcall = (method, params = {}) => new Promise((res, rej) => {
 })
 await new Promise((res, rej) => { bws.once('open', res); bws.once('error', rej) })
 
-// the user is looking at example.com; the panel is open alongside
-await bcall('Target.createTarget', { url: 'https://example.com' })
+// the user is looking at augmentatism.com; the panel is open alongside
+await bcall('Target.createTarget', { url: 'https://augmentatism.com/' })
 await bcall('Target.createTarget', { url: `chrome-extension://${EXT_ID}/sidepanel.html` })
 let page = null, web = null
 for (let i = 0; i < 30; i++) {
   await sleep(500)
   const list = await jfetch('/json')
   page = list.find((t) => t.type === 'page' && t.url.includes('sidepanel'))
-  web = list.find((t) => t.type === 'page' && t.url.includes('example.com'))
+  web = list.find((t) => t.type === 'page' && t.url.includes('augmentatism.com'))
   if (page && web) break
 }
-if (!page || !web) fail('sidepanel or example.com target not found')
+if (!page || !web) fail('sidepanel or augmentatism.com target not found')
 await bcall('Target.activateTarget', { targetId: web.id }) // the work tab
-process.stderr.write('[shots] targets: sidepanel + example.com (activated)\n')
+process.stderr.write('[shots] targets: sidepanel + augmentatism.com (activated)\n')
 
 // ---------- page WS helper ----------
 const attach = async (t) => {
@@ -139,7 +140,7 @@ const attach = async (t) => {
 }
 
 const P = await attach(page)   // side panel
-const W = await attach(web)    // example.com (the tab the agent drives)
+const W = await attach(web)    // augmentatism.com (the tab the agent drives)
 
 for (let i = 0; i < 40; i++) {
   const rs = await P.ev('document.readyState').catch(() => 'loading')
@@ -172,24 +173,28 @@ for (let i = 0; i < 120; i++) {
   veil = await W.ev(`!!(document.getElementById('__dshAugOverlay') && document.getElementById('__dshAugOverlay').querySelector('canvas'))`).catch(() => false)
   if (veil) break
 }
-if (!veil) fail('veil never appeared on the example.com tab')
+if (!veil) fail('veil never appeared on the augmentatism.com tab')
 await sleep(2500) // let the condense transition + pill settle
 await W.shot('shot-veil.png', 1280, 800)
 process.stderr.write('[shots] VEIL: captured mid-turn frost + status pill\n')
 
 // ---------- 4. Panel shot: settled conversation ----------
+// extraction reply: substantive prose about Augmentatism; accept a
+// case-insensitive "augment" mention plus a non-trivial length, then let
+// streaming settle (send button reappears).
 let reply = ''
-for (let i = 0; i < 120; i++) {
+for (let i = 0; i < 300; i++) {
   await sleep(1000)
   reply = (await P.ev('[...document.querySelectorAll("#log .msg.assistant .md")].map((n) => n.textContent || "").join("\\n")').catch(() => '')) || ''
-  if (reply.includes('Example Domain')) break
+  if (/augment/i.test(reply) && reply.length >= 80) break
 }
-if (!reply.includes('Example Domain')) fail('assistant reply did not mention the title', reply.slice(0, 200))
+if (!/augment/i.test(reply) || reply.length < 80) fail('assistant reply looks wrong', reply.slice(0, 200))
 let settled = false
-for (let i = 0; i < 30; i++) { await sleep(1000); if (await P.ev('!document.getElementById("send").hidden').catch(() => false)) { settled = true; break } }
+for (let i = 0; i < 60; i++) { await sleep(1000); if (await P.ev('!document.getElementById("send").hidden').catch(() => false)) { settled = true; break } }
 await sleep(800) // last paint, caret settled
 await P.shot('shot-panel.png', 420, 800)
 process.stderr.write(`[shots] PANEL: captured settled chat (settled=${settled}, reply ${reply.length} chars)\n`)
+process.stderr.write(`[shots] reply head: ${JSON.stringify(reply.slice(0, 400))}\n`)
 
 // ---------- 5. Cleanup: archive the probe session ----------
 const after = new Set(await augmSessions())

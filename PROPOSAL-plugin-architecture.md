@@ -1372,14 +1372,24 @@ v0.1.25 badge on the CTA caption, README package name. Mirror
 `lab/site-shots.mjs` (new): real-Chromium screenshot harness, m3-e2e pattern —
 headless Chromium (profile /tmp/chrome-shots-profile, port 9227,
 `--load-extension` + NMH manifest copied from ~/.config/chromium), drives the
-side panel with a probe prompt ("Open example.com and tell me the exact
-title"), waits for (a) the veil overlay `#__dshAugOverlay` canvas on the
-example.com tab → `assets/shot-veil.png` (1280×800 @2x) and (b) the panel
-assistant reply containing "Example Domain" + settled send button →
+side panel with a probe prompt (now "Extract the most important points from
+https://augmentatism.com/" — the site's own manifesto, per user request;
+originally example.com), waits for (a) the veil overlay `#__dshAugOverlay`
+canvas on the driven tab → `assets/shot-veil.png` (1280×800 @2x) and (b) the
+panel assistant reply (case-insensitive "augment", ≥80 chars) + settled send
+button →
 `assets/shot-panel.png` (420×800 @2x, matching the CSS aspect ratio).
 Self-archives the probe session and asserts the archive. Verified without a
 vision model: PNG dimensions/bytes + the harness's DOM assertions
 (describe_image's vision backend is misconfigured in this environment).
+
+Re-shoot (site commit 8b03f75): the extraction turn measured 146.9s
+(sessionStats: llmMs 145218 + toolMs 1727, 7 steps, 3380 decode tokens,
+Qwen3.8-27B-UD-Q6_K_XL local) → site stats caption now "2m 27s". The model
+hit the 6000-char `browser_snapshot` cap on the 3.5k-word manifesto and
+completed the read with a curl fetch — the panel shot shows that real agentic
+behaviour, and the IN ACTION mock's agent answer is condensed from the actual
+reply.
 
 Note: `augmentor/README.md` (product repo) is badly stale (M0 sidecar, local
 DSH clone, `session/interrupt` patches) — not part of this pass.
