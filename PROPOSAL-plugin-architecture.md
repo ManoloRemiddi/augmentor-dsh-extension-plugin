@@ -1467,5 +1467,20 @@ depends on it — the only other mention is the homepage positioning line
 design rationale already lives in the "WHY IT'S THIS SHAPE" bullets. Table
 now: 3 shipped pieces. Live: 200, 0 M0 refs, 3 rows.
 
+Site 6199cde (install tabs): per user, the homepage install section is now
+two tabs — "Automatic" (default/active, with a "recommended" pill) and
+"Manual". Automatic leads with the one-prompt agent install (prompt text
+reused verbatim from the existing auto-install card, kept identical to the
+docs.html copy) plus a "Copy prompt" button (clipboard API with
+execCommand fallback, "Copied ✓" feedback). Manual holds the previous step-0
+DSH card + A/B extension+plugin grid unchanged. Tab bar is a segmented
+pill control (role=tablist, aria-selected, arrow-key navigation); panels
+are display-toggled, single reveal on the wrapper. CSS v5 (tab + copy-btn
+rules), bumped in index + docs. Verified: playwright — auto active by
+default, both toggles + aria states, copy button state change, 0 console
+errors; live 200 (tabbar, auto-active, copy btn, v5 css serving byte-exact).
+docs.html keeps its own structure (steps + OR·automatic card) — not yet
+tabbed; offered to the user.
+
 Note: `augmentor/README.md` (product repo) is badly stale (M0 sidecar, local
 DSH clone, `session/interrupt` patches) — not part of this pass.
