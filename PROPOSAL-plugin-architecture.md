@@ -1482,5 +1482,21 @@ errors; live 200 (tabbar, auto-active, copy btn, v5 css serving byte-exact).
 docs.html keeps its own structure (steps + OR·automatic card) — not yet
 tabbed; offered to the user.
 
+Site c064cf0 (hero h1): per user, the opening headline is bigger and
+tighter. `.hero h1` went clamp(2.6/6.5vw/4.6rem) → clamp(2.8/6.9vw/5.2rem),
+line-height 1.05 → 1.0, letter-spacing -0.03 → -0.035em, margin-bottom
+1.4 → 1.5rem. Graphic interest added via CSS only (no HTML change): a
+one-time rise-in (h1-rise 0.9s, translateY+fade, fill both) and a slow
+seamless panning gradient on `.hero h1 .gradient-text` (4-stop loop
+emerald→mint→amber→emerald, background-size 300%, position 0%→150% so the
+loop point matches; 8s linear infinite) plus a soft emerald
+drop-shadow glow (22px, 0.28 alpha). Scoped to the hero h1 so the other
+gradient-text spans on the page stay static; prefers-reduced-motion
+disables both animations. CSS v6, bumped in index + docs. Verified:
+playwright — 83.2px/1.0 leading at 1280px viewport, exactly 5 rendered
+lines (distinct line tops), opacity settled at 1, gradient + glow computed
+styles present, 0 console errors, screenshot pixel-verified (white +
+emerald + amber all present); live 200, css v6 byte-exact (32875 B).
+
 Note: `augmentor/README.md` (product repo) is badly stale (M0 sidecar, local
 DSH clone, `session/interrupt` patches) — not part of this pass.
