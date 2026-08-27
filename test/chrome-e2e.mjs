@@ -177,25 +177,34 @@ for (let i = 0; i < 120; i++) {
   if (logText.includes(MARKER) && prose.trim()) break
 }
 const renderedUser = logText.includes(MARKER)
-// The new session must appear as a row titled from the marker prompt.
+// The new session must appear as a row. Match by SESSION ID, not title:
+// the DSH app rewrites session titles asynchronously after the turn (the
+// marker title gets replaced by the assistant's first line) — a title match
+// races that re-title. The row carries data-session-id for exactly this.
+let SID = null
+for (let i = 0; i < 30; i++) {
+  await sleep(500)
+  const now = new Set((await rpc('session.list', {})).items.map((s) => s.sessionId))
+  const fresh = [...now].filter((id) => !idsBefore.has(id))
+  if (fresh.length === 1) { SID = fresh[0]; break }
+}
+if (!SID) fail('new session did not appear in session.list after the turn')
 await ev('document.getElementById("sessions").click()') // close if open
 await sleep(300)
 await ev('document.getElementById("sessions").click()') // reopen, fresh list
 let rowFound = false
 for (let i = 0; i < 20; i++) {
   await sleep(500)
-  rowFound = await ev(`!![...document.querySelectorAll(".sp-row")].find(r => (r.querySelector(".sp-title")?.textContent ?? "").includes(${JSON.stringify(MARKER)}))`)
+  rowFound = await ev(`!![...document.querySelectorAll(".sp-row")].find(r => r.dataset.sessionId === ${JSON.stringify(SID)})`)
   if (rowFound) break
 }
-if (!rowFound) fail('marker session row not in the real Chrome list')
+if (!rowFound) fail('marker session row (by session id) not in the real Chrome list')
 process.stderr.write(`[e2e] REAL Chrome: marker session row present in the popover\n`)
 process.stderr.write(`[e2e] log: ${logText.length} chars, userTextRendered=${renderedUser}\n`)
 
 // ---------- 5. Cleanup: archive the probe session ----------
-const idsAfter = new Set((await rpc('session.list', {})).items.map((s) => s.sessionId))
-const newIds = [...idsAfter].filter((id) => !idsBefore.has(id))
-if (newIds.length !== 1) fail(`expected exactly one new session, got ${JSON.stringify(newIds)}`)
-const SID = newIds[0]
+// SID was pinned in step 4 (the id diff already asserted exactly one new
+// session); archive it directly.
 await rpc('workspace.archiveSession', { sessionId: SID })
 const archived = (await rpc('workspace.list', {})).archivedSessionIds ?? []
 if (!archived.includes(SID)) fail('probe session not archived', archived)

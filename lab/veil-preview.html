@@ -103,10 +103,14 @@
     if (location.search.includes('mode=frost')) window.__dshAugVariation = 'frost';
   </script>
   <script>
-    // Load the live veil.js on every page load. The local http.server sends
-    // no cache headers, so browsers heuristic-cache the script and A/B runs
-    // silently compare the same stale file. A fresh ?t= per load defeats that.
-    document.write('<script src="../extension/veil.js?t=' + Date.now() + '"><\/script>');
+    // Load the live theme-tokens.js + veil.js on every page load. The local
+    // http.server sends no cache headers, so browsers heuristic-cache the
+    // script and A/B runs silently compare the same stale file. A fresh ?t=
+    // per load defeats that. Order matters (F6): veil.js reads the palette
+    // from globalThis.__dshAugTheme and skips without theme-tokens.js.
+    const t = Date.now();
+    document.write('<script src="../extension/theme-tokens.js?t=' + t + '"><\/script>');
+    document.write('<script src="../extension/veil.js?t=' + t + '"><\/script>');
   </script>
   <script>
     const V = () => window.__dshAugVeil;

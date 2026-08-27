@@ -10,10 +10,12 @@
  * Consumers:
  *   - sidepanel.html: <script src="theme-tokens.js"> before theme-boot.js
  *     (which applies the tokens pre-paint) and sidepanel.js (live updates);
- *   - sw.js: importScripts('theme-tokens.js') for the veil accent hue and
- *     the click-pulse colors;
- *   - veil.js carries a compact COPY of veilPalette() so it stays
- *     self-contained when injected alone — keep the two in sync.
+ *   - sw.js: static import (module service worker) for the veil accent hue
+ *     and the click-pulse colors;
+ *   - veil.js: the SINGLE SOURCE for the veil palette — theme-tokens.js is
+ *     injected before veil.js at every site (sw.js injectFiles order,
+ *     lab/veil-preview.html script order) and veil.js reads
+ *     globalThis.__dshAugTheme.veilPalette; with it missing the veil skips.
  */
 (() => {
   'use strict'
@@ -24,6 +26,9 @@
   const DEFAULTS = { neutHue: 222, neutBright: 0, accentHue: 222, accentBright: 0 }
 
   function hslToRgb(h, s, l) {
+    // F6 (audit): normalize the hue FIRST. Role offsets can push a low user
+    // accent hue negative (snowFar −11.5 at hue 5 → −6.5); without this the
+    // branch chain below mis-classified the sector and x went negative.
     h = ((h % 360) + 360) % 360
     s = Math.max(0, Math.min(100, s)) / 100
     l = Math.max(0, Math.min(100, l)) / 100
@@ -61,24 +66,6 @@
   }
 
   /**
-   * Final lightness for an accent color given a base lightness and the
-   * accent brightness offset (−15..15).
-   *   bright >= 0 : adds lightness points (clamped 0..100) — brighten.
-   *   bright <  0 : fades multiplicatively toward FULL BLACK. At the slider
-   *                 minimum (−15) the color reaches lightness 0 (pure black);
-   *                 intermediate steps keep the color's relative tone (a
-   *                 uniform dim, not a collapse). Continuous at bright=0.
-   * The veil palette headroom-scales the POSITIVE offset before calling this
-   * (see veilPalette) so its brightest role can't white-out; that is a
-   * separate concern from this per-color rule. Keep in sync with veil.js.
-   */
-  function accentLight(l, bright) {
-    if (bright >= 0) return Math.max(0, Math.min(100, l + bright))
-    const t = 1 + bright / 15 // 1 at bright=0, 0 at bright=−15
-    return Math.max(0, l * t)
-  }
-
-  /**
    * Final lightness for an accent color given the accent brightness.
    *   bright >= 0 : +bright lightness points (additive, clamped 0..100)
    *   bright <  0 : dim toward FULL BLACK — at the slider minimum (−15) the
@@ -87,7 +74,8 @@
    *                 down (a uniform fade-to-black, not a collapse).
    * The veil palette additionally headroom-scales the POSITIVE offset (see
    * veilPalette) so its brightest role can't white-out; that scaling happens
-   * before this helper is called. Keep in sync with the copy in veil.js.
+   * before this helper is called. Single source — veil.js reads this
+   * (globalThis.__dshAugTheme), it no longer carries a copy.
    */
   function accentLight(l, bright) {
     if (bright >= 0) return Math.max(0, Math.min(100, l + bright))
@@ -171,7 +159,8 @@
    * (a cyan-leaning mid, warm white ice, …) is what gives it depth, and it
    * follows the accent coherently (e.g. a red accent gets orange mids).
    *
-   * Keep in sync with the copy in veil.js.
+   * Single source — the panel preview chip and veil.js both consume
+   * globalThis.__dshAugTheme (this file).
    */
   function veilPaletteSpec() {
     return {

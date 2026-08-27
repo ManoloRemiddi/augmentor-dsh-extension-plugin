@@ -33,6 +33,55 @@ function send(type, payload) {
   return chrome.runtime.sendMessage({ type, ...payload })
 }
 
+// F10 (audit): the header's three popovers (model picker, sessions, colors)
+// each carried their own open/close/position/outside-click/Escape
+// machinery — three near-identical copies of the same lifecycle. One factory
+// now owns it; each call site keeps only what is genuinely different (the
+// render step, the positioning direction, and per-call-site guards).
+//
+//   btn          trigger button (click toggles)
+//   el           the [hidden] popover element
+//   onOpen()     run AFTER the popover is visible, so render code can measure
+//   canOpen()    optional guard (returns false -> the click does nothing)
+//   above        open upward (footer chips) vs downward (header buttons)
+//   align        'right' (popover's right edge at the button's right) or
+//                'left' (popover's left edge at the button's left)
+//   toggleClass  toggle btn.classList 'open' (styled triggers; the hue
+//                button has no .open style and never had the class)
+function popover({ btn, el, onOpen, canOpen, above = false, align = 'right', toggleClass = true }) {
+  const open = () => {
+    if (!el.hidden) return
+    if (canOpen && !canOpen()) return
+    el.hidden = false
+    if (toggleClass) btn.classList.add('open')
+    if (onOpen) onOpen() // render first: the measurement below needs real size
+    const r = btn.getBoundingClientRect()
+    const margin = 8
+    el.style.top = above
+      ? `${Math.max(margin, r.top - el.offsetHeight - 6)}px`
+      : `${r.bottom + 6}px`
+    const anchor = align === 'left' ? r.left : r.right - el.offsetWidth
+    el.style.left = `${Math.max(margin, Math.min(anchor, window.innerWidth - el.offsetWidth - margin))}px`
+  }
+  const close = () => {
+    if (el.hidden) return
+    el.hidden = true
+    if (toggleClass) btn.classList.remove('open')
+  }
+  btn.addEventListener('click', (e) => {
+    e.stopPropagation()
+    if (el.hidden) open()
+    else close()
+  })
+  document.addEventListener('mousedown', (e) => {
+    if (!el.hidden && !el.contains(e.target) && !btn.contains(e.target)) close()
+  })
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && !el.hidden) close()
+  })
+  return { open, close }
+}
+
 // ── Model picker (the DSH composer's model seat) ────────────────────────────
 // The catalog + selection ride along on every log/connect reply (the SW owns
 // both, fetched from the bridge, which reads $DSH_HOME/settings.yaml — the
@@ -154,38 +203,22 @@ async function chooseModel(sel) {
   }
 }
 
-function openModelPop() {
-  if (ui.state.running) return
-  // Unhide FIRST: renderPicker skips the body while the popover is hidden
-  // (the early-return keeps 2 s polls cheap), so the body can only be built
-  // once the popover is visible — measuring below then sees its real height.
-  modelPop.hidden = false
-  renderPicker()
-  modelBtn.classList.add('open')
-  // The chip sits at the panel bottom: the menu opens above it.
-  const r = modelBtn.getBoundingClientRect()
-  const margin = 8
-  modelPop.style.top = `${Math.max(margin, r.top - modelPop.offsetHeight - 6)}px`
-  modelPop.style.left = `${Math.max(
-    margin,
-    Math.min(r.right - modelPop.offsetWidth, window.innerWidth - modelPop.offsetWidth - margin),
-  )}px`
-}
+// F10: popover() owns the toggle / outside-click / Escape lifecycle. The
+// menu opens ABOVE the chip (it sits at the panel bottom), is locked while a
+// turn runs (DSH parity — the ui.setState override below), and renders the
+// body while visible (renderPicker skips the body while hidden — the
+// early-return keeps the 2 s polls cheap — so the measurement inside
+// popover() sees its real height).
+const modelPopCtl = popover({
+  btn: modelBtn,
+  el: modelPop,
+  above: true,
+  canOpen: () => !ui.state.running,
+  onOpen: () => renderPicker(),
+})
 function closeModelPop() {
-  modelPop.hidden = true
-  modelBtn.classList.remove('open')
+  modelPopCtl.close()
 }
-modelBtn.addEventListener('click', (e) => {
-  e.stopPropagation()
-  if (modelPop.hidden) openModelPop()
-  else closeModelPop()
-})
-document.addEventListener('mousedown', (e) => {
-  if (!modelPop.hidden && !modelPop.contains(e.target) && !modelBtn.contains(e.target)) closeModelPop()
-})
-document.addEventListener('keydown', (e) => {
-  if (e.key === 'Escape' && !modelPop.hidden) closeModelPop()
-})
 
 // While a DSH session is open (viewSessionId set), the panel renders THAT
 // session's events, not the SW's own sidecar transcript: the 2 s poll and
@@ -234,9 +267,22 @@ const sessionsBtn = document.getElementById('sessions')
 const sessionsPop = document.getElementById('sessionspop')
 const sessionsPopBody = document.getElementById('sessionspop-body')
 
+// F10: popover() owns the toggle / outside-click / Escape lifecycle. The
+// list is left-aligned below the header button (the model menu is
+// right-aligned above the footer chip). The load starts on open — its first
+// await yields, so popover()'s positioning runs in the same tick as before.
+const sessionsPopCtl = popover({
+  btn: sessionsBtn,
+  el: sessionsPop,
+  align: 'left',
+  onOpen: () => {
+    renderSessionsList([])
+    sessionsPopBody.firstElementChild.textContent = 'Loading sessions…'
+    loadSessionsList()
+  },
+})
 function closeSessionsPop() {
-  sessionsPop.hidden = true
-  sessionsBtn.classList.remove('open')
+  sessionsPopCtl.close()
 }
 
 function renderSessionsList(items) {
@@ -254,6 +300,11 @@ function renderSessionsList(items) {
     row.type = 'button'
     row.className = 'sp-row'
     row.title = item.cwd ?? item.sessionId
+    // Stable handle for tests/future code: the DSH app rewrites session
+    // titles asynchronously after a turn (often to the assistant's first
+    // line), so anything that must identify a row must key on the id, not
+    // the rendered title.
+    row.dataset.sessionId = item.sessionId
     const dot = document.createElement('span')
     dot.className = 'sp-dot' + (item.running ? ' on' : '')
     const main = document.createElement('span')
@@ -317,18 +368,9 @@ async function openDshSession(item, title) {
   ui.applyLog(res.events.map((h) => ({ kind: 'event', sessionId: item.sessionId, event: h.event })))
 }
 
-sessionsBtn.addEventListener('click', async (e) => {
-  e.stopPropagation()
-  if (!sessionsPop.hidden) {
-    closeSessionsPop()
-    return
-  }
-  sessionsPop.hidden = false
-  renderSessionsList([])
-  sessionsPopBody.firstElementChild.textContent = 'Loading sessions…'
-  const r = sessionsBtn.getBoundingClientRect()
-  sessionsPop.style.top = `${r.bottom + 6}px`
-  sessionsPop.style.left = `${Math.max(8, Math.min(r.left, window.innerWidth - sessionsPop.offsetWidth - 8))}px`
+// F10: the open path is the popover() factory's (see above); this is the
+// load it triggers — the list fetch, the one retry, and the cap footer.
+async function loadSessionsList() {
   let res = await send('session/list')
   // 0.1.18: a not-ready SW (just woken, or mid-reconnect) already forces a
   // fresh handshake inside the SW (requireReady) — give it 1.5 s and retry
@@ -357,13 +399,7 @@ sessionsBtn.addEventListener('click', async (e) => {
     foot.textContent = `Latest ${res.items.length} of ${res.total} sessions`
     sessionsPopBody.appendChild(foot)
   }
-})
-document.addEventListener('mousedown', (e) => {
-  if (!sessionsPop.hidden && !sessionsPop.contains(e.target) && !sessionsBtn.contains(e.target)) closeSessionsPop()
-})
-document.addEventListener('keydown', (e) => {
-  if (e.key === 'Escape' && !sessionsPop.hidden) closeSessionsPop()
-})
+}
 
 // Keep the footer's Send/Stop pair in lock-step with the run state: Stop shows
 // only while a turn is active; Send returns the moment the agent goes idle.
@@ -486,31 +522,21 @@ function syncPopInputs() {
   accentBrightEl.value = settings.accentBright
 }
 
-function openPop() {
-  syncPopInputs()
-  applyColorSettings()
-  const r = hueBtn.getBoundingClientRect()
-  pop.hidden = false
-  const margin = 8
-  const left = Math.max(margin, Math.min(r.right - pop.offsetWidth, window.innerWidth - pop.offsetWidth - margin))
-  pop.style.top = `${r.bottom + 6}px`
-  pop.style.left = `${left}px`
-}
+// F10: popover() owns the lifecycle. The hue button has no .open style (the
+// class never lived here — toggleClass off); it opens below, right-aligned,
+// like the model menu's geometry.
+const huePopCtl = popover({
+  btn: hueBtn,
+  el: pop,
+  toggleClass: false,
+  onOpen: () => {
+    syncPopInputs()
+    applyColorSettings()
+  },
+})
 function closePop() {
-  pop.hidden = true
+  huePopCtl.close()
 }
-
-hueBtn.addEventListener('click', (e) => {
-  e.stopPropagation()
-  if (pop.hidden) openPop()
-  else closePop()
-})
-document.addEventListener('mousedown', (e) => {
-  if (!pop.hidden && !pop.contains(e.target) && e.target !== hueBtn) closePop()
-})
-document.addEventListener('keydown', (e) => {
-  if (e.key === 'Escape' && !pop.hidden) closePop()
-})
 
 for (const [el, key] of [
   [neutHueEl, 'neutHue'],

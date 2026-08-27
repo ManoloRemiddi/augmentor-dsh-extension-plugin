@@ -1,5 +1,6 @@
 // M1 exit proof, headless: REAL sidepanel.js + chat-render.js (ES modules in
-// jsdom) + REAL sw.js (vm) + REAL pipe (host-manifest spawn) + live DSH server.
+// jsdom) + REAL sw.js (module realm via vm.SourceTextModule — F1: sw.js is a
+// module service worker) + REAL pipe (host-manifest spawn) + live DSH server.
 //
 // Repo home: augmentor/test/panel-e2e.mjs — deps: `cd test && npm i`
 // (jsdom + marked; test/package.json). The panel code under test is the
@@ -11,13 +12,13 @@
 // -> send a unique marker prompt -> assert the user bubble + assistant prose
 // rendered into #log -> reopen the session from the popover and assert the
 // history replay -> archive the probe session.
-import { spawn } from 'node:child_process'
+import { spawn, spawnSync } from 'node:child_process'
 import vm from 'node:vm'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { createRequire } from 'node:module'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 const require = createRequire(import.meta.url)
 const { JSDOM } = require('jsdom')
 const markedNpm = (await import('marked')).marked
@@ -31,6 +32,17 @@ const m = JSON.parse(fs.readFileSync(MANIFEST, 'utf8'))
 const EXT_ID = m.allowed_origins?.[0]?.match(/chrome-extension:\/\/([^/]+)/)?.[1]
 const fail = (msg) => { console.error('RENDER FAIL:', msg); process.exit(1) }
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
+// F1: the SW is loaded below with vm.SourceTextModule, which requires
+// --experimental-vm-modules. Re-exec self once when the flag is absent —
+// the flagged child is the real run (env is inherited).
+if (!process.execArgv.includes('--experimental-vm-modules')) {
+  const r = spawnSync(
+    process.execPath,
+    ['--experimental-vm-modules', process.argv[1], ...process.argv.slice(2)],
+    { stdio: 'inherit' },
+  )
+  process.exit(r.status ?? 1)
+}
 
 // ---------- pipe (spawned as Chrome would) ----------
 const pipe = spawn(m.path, [`chrome-extension://${EXT_ID}/`], { stdio: ['pipe', 'pipe', 'pipe'] })
@@ -98,16 +110,43 @@ const fakePort = {
   postMessage: (o) => pipeSend(o),
   disconnect: () => { try { pipe.kill() } catch {} },
 }
+// F1: sw.js is a module entry (manifest "type": "module") — static imports
+// that vm.runInContext (classic script) cannot execute. vm.SourceTextModule
+// loads the real module graph in its OWN context: exactly what Chrome does
+// for a module service worker (a separate realm with its own chrome object
+// — the panel below keeps its own, so the two never cross).
 const swSandbox = {
   console, setTimeout, clearTimeout, setInterval, clearInterval,
   crypto, URL, TextEncoder, TextDecoder, fetch,
   chrome: swChrome,
   self: { location: { origin: `chrome-extension://${EXT_ID}` } },
 }
-let swCtx
-swSandbox.importScripts = (f) => vm.runInContext(fs.readFileSync(path.join(EXT, f), 'utf8'), swCtx)
-swCtx = vm.createContext(swSandbox)
-vm.runInContext(fs.readFileSync(path.join(EXT, 'sw.js'), 'utf8'), swCtx)
+const swCtx = vm.createContext(swSandbox)
+const swModules = new Map() // file URL -> SourceTextModule
+const swLinkPromises = new Map() // file URL -> the link() Promise
+function loadSwModule(file) {
+  const url = pathToFileURL(file).href
+  if (swModules.has(url)) return swModules.get(url)
+  const mod = new vm.SourceTextModule(fs.readFileSync(file, 'utf8'), {
+    identifier: `sw:${path.basename(file)}`,
+    context: swCtx,
+  })
+  swModules.set(url, mod)
+  const base = path.dirname(file)
+  // link() RETURNS A PROMISE (resolves when the module graph reaches
+  // `linked`); the linker callback itself must return Module objects
+  // synchronously — the recursion below does exactly that.
+  swLinkPromises.set(url, mod.link((specifier) => {
+    // The SW graph is all relative files (./port.mjs, …); a bare specifier
+    // would be a regression the harness must not paper over.
+    if (!specifier.startsWith('.')) throw new Error('unexpected bare specifier in extension SW: ' + specifier)
+    return loadSwModule(path.join(base, specifier))
+  }))
+  return mod
+}
+const swEntry = loadSwModule(path.join(EXT, 'sw.js'))
+await swLinkPromises.get(pathToFileURL(path.join(EXT, 'sw.js')).href)
+await swEntry.evaluate()
 if (swRuntimeListeners.length === 0) fail('sw.js registered no runtime.onMessage listener')
 const swHandler = swRuntimeListeners[swRuntimeListeners.length - 1]
 // panel -> SW: exactly what chrome.runtime.sendMessage does in Chrome.
@@ -169,7 +208,7 @@ const doc = window.document
 // send button, which updateChrome enables only when phase === 'ready'.
 const sendReady = () => !doc.getElementById('send').disabled
 
-// ---------- 1. Auto-connect (the real sw.js connects at vm-boot) ----------
+// ---------- 1. Auto-connect (the real sw.js connects at SW boot) ----------
 let waited = 0
 while (!sendReady() && waited < 30000) {
   await sleep(250); waited += 250
@@ -237,6 +276,16 @@ while (waited < 120000) {
   if (logText.includes(MARKER) && prose.trim()) break
 }
 const renderedUser = logText.includes(MARKER)
+// Assistant prose, re-read at the end (not just the loop's break moment):
+// the conversation is "visibly rendered" iff the user bubble AND non-empty
+// assistant prose are in #log. (The old 200-char log floor was a proxy that
+// depended on how chatty the model was — a model that obeys "reply with
+// exactly one line: OK" produces ~2 chars of prose and a 62-char log, which
+// is a fully rendered conversation, not a failure.)
+const renderedProse = [...doc.querySelectorAll('#log .msg.assistant .md')]
+  .map((n) => n.textContent || '')
+  .join('')
+  .trim()
 const assistantBubbles = doc.querySelectorAll('#log .assistant').length
 const userBubbles = doc.querySelectorAll('#log .user').length
 const titleText = doc.getElementById('title')?.textContent
@@ -246,6 +295,20 @@ process.stderr.write(
 
 // ---------- 4b. Reopen the session from the popover (row click -> history replay) ----------
 // The list captured in step 2 predates the new session: close and reopen.
+// The row is identified by SESSION ID, not title: the DSH app rewrites
+// session titles asynchronously after the turn (observed: the marker title
+// "PANEL_E2E_OK_… — reply with exa…" gets replaced by "OK", the assistant's
+// first line) — a title match races that re-title and drifts between runs.
+// The id diff is the same drift-free target cleanup (4c) already uses.
+let SID = null
+waited = 0
+while (!SID && waited < 15000) {
+  await sleep(500); waited += 500
+  const now = new Set((await rpc('session.list', {})).items.map((s) => s.sessionId))
+  const fresh = [...now].filter((id) => !idsBefore.has(id))
+  if (fresh.length === 1) SID = fresh[0]
+}
+if (!SID) fail('new session did not appear in session.list after the turn')
 await doc.getElementById('sessions').click() // close
 await sleep(300)
 await doc.getElementById('sessions').click() // reopen, fresh list
@@ -253,12 +316,9 @@ let targetRow = null
 waited = 0
 while (!targetRow && waited < 10000) {
   await sleep(250); waited += 250
-  targetRow =
-    [...doc.querySelectorAll('.sp-row')].find(
-      (r) => (r.querySelector('.sp-title')?.textContent ?? '').includes(MARKER),
-    ) ?? null
+  targetRow = [...doc.querySelectorAll('.sp-row')].find((r) => r.dataset.sessionId === SID) ?? null
 }
-if (!targetRow) fail('new session row (marker title) not in reopened popover')
+if (!targetRow) fail('new session row (by session id) not in reopened popover')
 await targetRow.click()
 process.stderr.write(`[harness] clicked row: title="${targetRow.querySelector('.sp-title')?.textContent}"\n`)
 let replayText = ''
@@ -272,10 +332,8 @@ if (!replayText.trim()) fail('history replay rendered no assistant prose')
 process.stderr.write(`[harness] history replay: ${replayText.trim().length} chars of assistant prose\n`)
 
 // ---------- 4c. Cleanup: archive the probe session (the sweep's end state) ----------
-const idsAfter = new Set((await rpc('session.list', {})).items.map((s) => s.sessionId))
-const newIds = [...idsAfter].filter((id) => !idsBefore.has(id))
-if (newIds.length !== 1) fail(`expected exactly one new session, got ${JSON.stringify(newIds)}`)
-const SID = newIds[0]
+// SID was pinned in 4b (the id diff already asserted exactly one new
+// session); archive it directly.
 await rpc('workspace.archiveSession', { sessionId: SID })
 const archived = (await rpc('workspace.list', {})).archivedSessionIds ?? []
 if (!archived.includes(SID)) fail('probe session not archived', archived)
@@ -293,13 +351,14 @@ const out = {
     assistantBubbles,
     title: titleText,
     userTextRendered: renderedUser,
+    assistantProseChars: renderedProse.length,
     historyReplayChars: replayText.trim().length,
   },
   maxPipeFrameBytes: maxFrame,
   under1MiB: maxFrame < 1024 * 1024,
 }
 console.log(JSON.stringify(out, null, 1))
-if (!renderedUser || logText.length < 200) fail(`conversation not visibly rendered (logChars=${logText.length}, userTextRendered=${renderedUser})`)
+if (!renderedUser || !renderedProse) fail(`conversation not visibly rendered (logChars=${logText.length}, userTextRendered=${renderedUser}, proseChars=${renderedProse.length})`)
 console.error('RENDER: OK — a DSH conversation is visible in the (headless) Augmentor panel')
 try { pipe.kill() } catch {}
 process.exit(0)

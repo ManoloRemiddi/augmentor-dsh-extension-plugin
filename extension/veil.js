@@ -61,82 +61,17 @@
   // The whole effect used to be hardcoded green. It is now driven by ONE
   // hue — the user's accent color from the side panel (sw.js passes it to
   // show(); lab/veil-preview.html passes it too; with no hue the original
-  // green (142) stays for A/B parity). Each role keeps the original green
-  // palette's saturation/lightness at accent-hue + a small fixed offset, so
-  // the palette retains its internal hue spread (deep vs ice vs vein)
-  // whatever hue is chosen.
+  // green (142) stays for A/B parity).
   //
-  // SYNC: this hslToRgb + VEIL_SPEC must stay in lockstep with
-  // extension/theme-tokens.js (veilPaletteSpec) — the panel's veil preview
-  // chip and the lab verifier compute the same colors.
-  function hslToRgb(h, s, l) {
-    h = ((h % 360) + 360) % 360
-    s /= 100
-    l /= 100
-    const c = (1 - Math.abs(2 * l - 1)) * s
-    const hp = h / 60
-    const x = c * (1 - Math.abs((hp % 2) - 1))
-    let r = 0
-    let g = 0
-    let b = 0
-    if (hp < 1) [r, g, b] = [c, x, 0]
-    else if (hp < 2) [r, g, b] = [x, c, 0]
-    else if (hp < 3) [r, g, b] = [0, c, x]
-    else if (hp < 4) [r, g, b] = [0, x, c]
-    else if (hp < 5) [r, g, b] = [x, 0, c]
-    else [r, g, b] = [c, 0, x]
-    const m = l - c / 2
-    return [Math.round((r + m) * 255), Math.round((g + m) * 255), Math.round((b + m) * 255)]
-  }
-  // Accent lightness from base lightness + accent brightness (−15..15).
-  // bright >= 0 : +bright lightness points (clamped 0..100) — brighten.
-  // bright <  0 : fade multiplicatively to FULL BLACK; at −15 lightness is
-  // 0 (pure black). Continuous at 0. Keep in sync with theme-tokens.js.
-  function accentLight(l, bright) {
-    if (bright >= 0) return Math.max(0, Math.min(100, l + bright))
-    const t = 1 + bright / 15
-    return Math.max(0, l * t)
-  }
-  // [hue offset from the accent, saturation, lightness] per effect role.
-  // At accent hue 142 these reproduce the original green look exactly.
-  const VEIL_SPEC = {
-    deep: [0.5, 72.7, 4.3],
-    mid: [-2, 88.2, 26.7],
-    mid2: [6.5, 85.5, 27.1],
-    ice: [-8, 72.9, 88.4],
-    vein: [5, 84, 49],
-    edge: [-2.5, 71.7, 36.1],
-    dot: [0, 70.6, 45.3],
-    dotDone: [0, 69.2, 58],
-    label: [2.5, 54.8, 93.9],
-    pillBg1: [8, 25, 3.1],
-    pillBg2: [8, 27.3, 4.3],
-    fog2: [16, 64.4, 51.6],
-    snowNear: [18, 34.5, 66.5],
-    snowFar: [-11.5, 63.6, 91.4],
-    glyphNear: [-10, 62.5, 3.1],
-    glyphFar: [-4, 55.9, 11.6],
-  }
-  // `bright` (−15..15) shifts every role's lightness. The + side is
-  // headroom-scaled: the roles span 3.1..93.9, so unscaled +15 would white-out
-  // the extremes; after scaling every role keeps its designed delta. The −
-  // side fades multiplicatively to FULL BLACK (accentLight): at the slider
-  // minimum (−15) every role reaches lightness 0, intermediate steps keep the
-  // roles' relative spacing. Keep in sync with theme-tokens.js (veilPalette).
-  function veilPalette(h, bright) {
-    h = Number.isFinite(h) ? h : 142
-    const lights = Object.values(VEIL_SPEC).map((t) => t[2])
-    let off = Number.isFinite(bright) ? bright : 0
-    if (off > 0) {
-      const headroom = 100 - Math.max(...lights)
-      const scale = headroom / 15
-      if (scale < 1) off *= scale
-    }
-    const p = { hue: h }
-    for (const [k, [offH, s, l]] of Object.entries(VEIL_SPEC))
-      p[k] = hslToRgb(h + offH, s, accentLight(l, off))
-    return p
-  }
+  // F6 (audit): the palette math (hslToRgb / accentLight / the per-role
+  // VEIL_SPEC / veilPalette) used to live here as a compact copy of
+  // theme-tokens.js, kept in sync by hand. It is now the SINGLE SOURCE:
+  // theme-tokens.js, injected BEFORE this file at every site (sw.js
+  // injectFiles order, lab/veil-preview.html script order). Without it a
+  // mis-colored veil is worse than no veil — the veil skips cleanly.
+  const theme = globalThis.__dshAugTheme
+  if (!theme) return
+  const { veilPalette } = theme
   const rgba = (rgb, a) => `rgba(${rgb[0]}, ${rgb[1]}, ${rgb[2]}, ${a})`
   const rgb = (rgb) => `rgb(${rgb[0]}, ${rgb[1]}, ${rgb[2]})`
 

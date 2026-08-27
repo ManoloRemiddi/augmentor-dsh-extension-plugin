@@ -12,7 +12,8 @@
  *   Chrome SW ──[native frames]──▶ pipe.mjs ──[POST /api/<method>]──▶ DSH app
  *                                    │  └─[WS /api/events.mux]──▶ downlink frames
  *                                    │  └─[WS /api/events.host]─▶ downlink frames
- *                                    └─[WS /api/augmentor/ws]──▶ dsh-augmentor plugin
+ *                                    └─[WS <wsPath from the plugin's GET
+ *                                       /api/augmentor handshake>]─▶ plugin
  *
  * Frame vocabulary with the extension is UNCHANGED from the old bridge
  * (sw.js stays the baseline):
@@ -48,6 +49,10 @@ import os from 'node:os'
 import { fileURLToPath } from 'node:url'
 import { randomBytes } from 'node:crypto'
 import WebSocket from 'ws'
+// F5 (audit): shared frame codec + pending table — one implementation with
+// the plugin and the extension service worker (wire.mjs; the extension ships
+// a byte-identical copy, asserted by sw-e2e).
+import { decode as wireDecode, encode as wireEncode, Pending } from './wire.mjs'
 
 const AUGMENTOR_DIR = path.dirname(fileURLToPath(import.meta.url))
 
@@ -251,7 +256,7 @@ let outPumping = false
 // readable error frame instead; a push frame is dropped (logged).
 const NMH_FRAME_MAX = 1024 * 1024
 function pushFrame(obj) {
-  const json = Buffer.from(JSON.stringify(obj), 'utf8')
+  const json = Buffer.from(wireEncode(obj), 'utf8')
   const frame = Buffer.allocUnsafe(4)
   frame.writeUInt32LE(json.length, 0)
   trace({ kind: 'ext<-pipe', msg: obj })
@@ -259,7 +264,7 @@ function pushFrame(obj) {
   pumpOut()
 }
 function sendToExt(obj) {
-  const json = Buffer.from(JSON.stringify(obj), 'utf8')
+  const json = Buffer.from(wireEncode(obj), 'utf8')
   if (json.length + 4 > NMH_FRAME_MAX) {
     log('oversized frame suppressed', obj.id ?? obj.method ?? '?', `${json.length} bytes (>1 MiB)`)
     if (obj.id !== undefined) {
@@ -292,7 +297,7 @@ const forwardedRpc = new Map() // rpcId → 'mux' | 'host'
 const pluginPending = new Map() // plugin id → true
 // Extension-originated lifecycle requests (augmentor/save|unsave|state)
 // forwarded to the plugin, waiting for its reply frame.
-const pluginReplyWaiters = new Map() // id → {resolve, reject, timer}
+const pluginReplyWaiters = new Pending() // F5: id → {resolve, reject, timer, …}
 const PLUGIN_TIMEOUT_MS = 30000
 
 async function routeExtReply(msg) {
@@ -312,42 +317,78 @@ async function routeExtReply(msg) {
 // ------------------------------------------------------- plugin channel
 let pluginWs = null
 function pluginSend(obj) {
-  if (pluginWs && pluginWs.readyState === WebSocket.OPEN) pluginWs.send(JSON.stringify(obj))
+  if (pluginWs && pluginWs.readyState === WebSocket.OPEN) pluginWs.send(wireEncode(obj))
 }
 const WS_TOKEN = resolveToken()
 
-function openPluginWs() {
+// D5 (audit): the pipe's copy of the wire protocol the plugin must speak.
+// Each endpoint declares what it expects; a mismatch is logged loudly at the
+// handshake and at the plugin's welcome frame (below).
+const PROTOCOL_EXPECTED = 'augmentor-pipe/v1'
+
+// D5 (audit): the plugin's HTTP handshake (GET <apiPath>) carries the live
+// wsPath (configurable in the plugin config) plus its protocol/version.
+// Resolved on every (re)connect; PLUGIN_WS_PATH is only the offline fallback
+// (app down / plugin not up yet — the connect will retry anyway).
+let pluginInfo = null
+async function fetchPluginHandshake() {
+  try {
+    const res = await fetch(`${DSH_BASE}/api/augmentor`, { signal: AbortSignal.timeout(3000) })
+    if (!res.ok) {
+      log('plugin handshake failed:', res.status)
+      pluginInfo = null
+      return null
+    }
+    const body = await res.json()
+    pluginInfo = body
+    log(`plugin handshake: ${body.name} ${body.protocol} v${body.version}, wsPath=${body.wsPath}`)
+    return body
+  } catch (e) {
+    log('plugin handshake failed:', e.message)
+    pluginInfo = null
+    return null
+  }
+}
+
+async function openPluginWs() {
   if (pluginWs) return
+  const info = await fetchPluginHandshake()
+  if (info?.protocol && info.protocol !== PROTOCOL_EXPECTED) {
+    log(`PROTOCOL MISMATCH: pipe expects ${PROTOCOL_EXPECTED}, plugin reports ${info.protocol} — frames may not interoperate`)
+  }
+  // D5 (audit): the wsPath comes from the handshake, not the constant.
+  const wsPath = info?.wsPath || PLUGIN_WS_PATH
   // S7 (audit): the token rides a WS handshake header. The query param is a
   // TEMPORARY legacy shim: the DSH app process may still hold the old plugin
   // (query-only reader) until its ESM cache is busted, so we send both for
   // now. Once the plugin has been reloaded, the shim may be dropped — a
   // query token otherwise lands in any request log the DSH app keeps.
   const tokenQ = WS_TOKEN.token ? `?token=${encodeURIComponent(WS_TOKEN.token)}` : ''
-  const url = `${DSH_BASE.replace(/^http/, 'ws')}${PLUGIN_WS_PATH}${tokenQ}`
+  const url = `${DSH_BASE.replace(/^http/, 'ws')}${wsPath}${tokenQ}`
   const ws = new WebSocket(url, { headers: WS_TOKEN.token ? { 'x-augmentor-token': WS_TOKEN.token } : {} })
   pluginWs = ws
-  ws.on('open', () => log('plugin ws connected', PLUGIN_WS_PATH))
+  ws.on('open', () => log('plugin ws connected', wsPath))
   ws.on('message', (data) => {
-    let frame
-    try {
-      frame = JSON.parse(String(data))
-    } catch {
-      return
-    }
+    const frame = wireDecode(String(data))
+    if (!frame || typeof frame !== 'object') return
     trace({ kind: 'plugin', dir: 'plugin->pipe', msg: frame })
-    if (frame.type === 'reply' && frame.id !== undefined) {
-      // Answer to an augmentor/save|unsave|state request we forwarded.
-      const waiter = pluginReplyWaiters.get(frame.id)
-      if (waiter) {
-        pluginReplyWaiters.delete(frame.id)
-        clearTimeout(waiter.timer)
-        if (frame.error) waiter.reject(new Error(frame.error.message ?? JSON.stringify(frame.error)))
-        else waiter.resolve(frame.result)
+    if (frame.type === 'welcome') {
+      // D5 (audit): the plugin identifies itself on connect — validate it
+      // (name/protocol/version) instead of silently dropping the frame.
+      if (frame.name !== 'dsh-augmentor') log('unexpected plugin name in welcome:', frame.name)
+      if (frame.protocol !== PROTOCOL_EXPECTED) {
+        log(`PROTOCOL MISMATCH: pipe expects ${PROTOCOL_EXPECTED}, plugin sent ${frame.protocol} — frames may not interoperate`)
+      } else {
+        log(`plugin hello: ${frame.name} ${frame.protocol} v${frame.version}`)
       }
       return
     }
-    if (frame.type !== 'request' || frame.id === undefined) return // welcome etc.
+    if (frame.type === 'reply' && frame.id !== undefined) {
+      // Answer to an augmentor/save|unsave|state request we forwarded.
+      pluginReplyWaiters.settle(frame.id, frame.result, frame.error ? new Error(frame.error.message ?? JSON.stringify(frame.error)) : null)
+      return
+    }
+    if (frame.type !== 'request' || frame.id === undefined) return
     if (frame.method !== 'browser/execute') {
       pluginSend({ type: 'reply', id: frame.id, error: { message: `unsupported method: ${frame.method}` } })
       return
@@ -396,11 +437,9 @@ function openDownlink(stream) {
   downlinks.set(stream, { ws, open: true })
   ws.on('open', () => log('downlink open', stream))
   ws.on('message', (data) => {
-    try {
-      onDownlinkFrame(stream, JSON.parse(String(data)))
-    } catch (e) {
-      log('downlink frame error', stream, e.message)
-    }
+    const frame = wireDecode(String(data))
+    if (!frame) return
+    onDownlinkFrame(stream, frame)
   })
   ws.on('close', () => {
     downlinks.set(stream, { ws, open: false })
@@ -418,7 +457,16 @@ function scheduleReconnect(open, key) {
   const timer = setTimeout(() => {
     retryTimers.delete(key)
     try {
-      open()
+      const r = open()
+      // F5 (audit): retry targets may be async (openPluginWs, boot) — a
+      // rejected promise escapes the try/catch above and becomes an
+      // unhandledRejection instead of a logged, rescheduled retry.
+      if (r && typeof r.catch === 'function') {
+        r.catch((e) => {
+          log('reconnect failed', key, e.message)
+          scheduleReconnect(open, key)
+        })
+      }
     } catch (e) {
       log('reconnect failed', key, e.message)
       scheduleReconnect(open, key)
@@ -599,14 +647,14 @@ async function handleExtMessage(msg) {
       if (!pluginWs || pluginWs.readyState !== WebSocket.OPEN) {
         throw new Error('plugin channel not connected — the DSH app or the Augmentor plugin is not up')
       }
-      value = await new Promise((resolve, reject) => {
-        const timer = setTimeout(() => {
-          pluginReplyWaiters.delete(id)
-          reject(new Error(`plugin request timed out after ${PLUGIN_TIMEOUT_MS}ms`))
-        }, PLUGIN_TIMEOUT_MS)
-        pluginReplyWaiters.set(id, { resolve, reject, timer })
-        pluginSend({ type: 'request', id, method: msg.method, params: msg.params ?? {} })
-      })
+      // F5: the waiter is the wire Pending — add() returns the promise and
+      // owns the timeout (it rejects the entry and settle() clears it on a
+      // reply), so no manual timer bookkeeping (and no stale-timer crash 30
+      // s after a plugin request, which the old Map-style code left behind
+      // because Pending has no set/delete).
+      const reply = pluginReplyWaiters.add(id, { timeoutMs: PLUGIN_TIMEOUT_MS })
+      pluginSend({ type: 'request', id, method: msg.method, params: msg.params ?? {} })
+      value = await reply
     } else {
       value = localMethods[msg.method] ? await localMethods[msg.method](msg.params) : await dsh(msg.method, msg.params ?? {})
     }
@@ -637,7 +685,7 @@ async function boot() {
   openDownlink('mux')
   openDownlink('host')
   log('action-channel token source:', WS_TOKEN.source)
-  openPluginWs()
+  void openPluginWs()
 }
 
 // --------------------------------------------------------------- lifecycle
@@ -648,11 +696,9 @@ process.stdin.on('data', (chunk) => {
     if (stdinBuf.length < 4 + len) break
     const raw = stdinBuf.subarray(4, 4 + len)
     stdinBuf = stdinBuf.subarray(4 + len)
-    let msg
-    try {
-      msg = JSON.parse(raw.toString('utf8'))
-    } catch (e) {
-      log('bad frame from extension', e.message)
+    const msg = wireDecode(raw.toString('utf8'))
+    if (!msg || typeof msg !== 'object') {
+      log('bad frame from extension')
       continue
     }
     void handleExtMessage(msg)

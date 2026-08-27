@@ -48,6 +48,57 @@ mkdir -p "$HOME/.dsh"
   }
 ' "$TOKEN_FILE"
 
+# D5 (audit): M1 <-> M4 mount conflict guard.
+#   M1 mounted the plugin entry directly from source in the DSH home patch
+#   file:  - insert: / - id: dsh-augmentor / name: '<abs path>?src=<commit>'
+#   M4 (dsh plugin add) mounts the package by bare name:
+#                - insert: / - id: dsh-augmentor / name: 'dsh-augmentor'
+# Both can coexist in the SAME file (separate list items, same id). When
+# that happens the source mount is stale: the package in the profile's
+# node_modules is what the plugin reconcile keeps. Drop the M1 block (its
+# comment header included), keep a .bak, and warn. Only when the file holds
+# exactly one ?src= mount AND at least one bare-name mount — otherwise
+# leave the file untouched (no guessing).
+DSH_PATCH="${DSH_PATCH:-$HOME/.dsh/cordis.patch.yml}"
+if [ -f "$DSH_PATCH" ]; then
+  RANGE="$(awk '
+    { L[NR] = $0 }
+    END {
+      n = NR
+      # Top-level entries start at column-0 "- " lines; the comment/blank
+      # run directly above each start belongs to that entry.
+      m = 0
+      for (i = 1; i <= n; i++) if (L[i] ~ /^- /) { m++; S[m] = i }
+      for (k = 1; k <= m; k++) {
+        t = S[k]
+        while (t > 1 && (L[t-1] ~ /^#/ || L[t-1] ~ /^[[:space:]]*$/)) t--
+        TS[k] = t
+      }
+      # second pass: TE depends on the NEXT entry TS (not computed yet
+      # inside the loop above)
+      for (k = 1; k <= m; k++) TE[k] = (k < m ? TS[k+1] - 1 : n)
+      m1 = 0; m4 = 0; m1k = 0
+      for (k = 1; k <= m; k++) {
+        inb = 0; src = 0
+        for (i = TS[k]; i <= TE[k]; i++) {
+          if (L[i] ~ /id:[[:space:]]*dsh-augmentor[[:space:]]*$/) inb = 1
+          if (inb && L[i] ~ /\?src=/) src = 1
+        }
+        if (!inb) continue
+        if (src) { m1++; m1k = k } else m4++
+      }
+      if (m1 == 1 && m4 >= 1) print TS[m1k], TE[m1k]
+    }
+  ' "$DSH_PATCH")"
+  if [ -n "$RANGE" ]; then
+    set -- $RANGE
+    cp "$DSH_PATCH" "$DSH_PATCH.bak"
+    awk -v s="$1" -v e="$2" 'NR >= s && NR <= e { next } { print }' "$DSH_PATCH" > "$DSH_PATCH.tmp"
+    mv "$DSH_PATCH.tmp" "$DSH_PATCH"
+    echo "warn: dropped the stale M1 source mount (?src=) for dsh-augmentor from $DSH_PATCH (lines $1-$2); the M4 package mount wins. Backup: $DSH_PATCH.bak" >&2
+  fi
+fi
+
 mkdir -p "$CONFIG_DIR/NativeMessagingHosts"
 OUT="$CONFIG_DIR/NativeMessagingHosts/$HOST_NAME.json"
 cat > "$OUT" <<EOF

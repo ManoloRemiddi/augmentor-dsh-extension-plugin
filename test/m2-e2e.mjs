@@ -154,6 +154,17 @@ async function waitReply(marker, ms = 180000) {
   }
   return null
 }
+// DSH /api client (same envelope the pipe uses) — declared before the
+// prompt so the id-diff below can run.
+const rpc = (method, payload) =>
+  fetch('http://127.0.0.1:3080/api/' + method, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ type: 'client-request', rpcId: 'm2-1', method, payload }),
+  }).then((r) => r.json()).then((b) => {
+    if (!b?.result?.ok) throw new Error(method + ': ' + JSON.stringify(b?.result?.error))
+    return b.result.value
+  })
+const idsBefore = new Set((await rpc('session.list', {})).items.map((s) => s.sessionId))
 let reply = await (async () => {
   const t0 = Date.now()
   await sendPrompt(PROMPT)
@@ -208,14 +219,6 @@ process.stderr.write(`[m2] picker: ${rows} rows, switched ${modelLabel0} -> ${mo
 const listItems = await ev('(async () => { document.getElementById("sessions").click(); await new Promise(r => setTimeout(r, 3000)); return [...document.querySelectorAll(".sp-row")].map(r => r.title) })()')
 const rowCount = listItems.length
 // the created session is visible to the app: query the app directly
-const rpc = (method, payload) =>
-  fetch('http://127.0.0.1:3080/api/' + method, {
-    method: 'POST', headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ type: 'client-request', rpcId: 'm2-1', method, payload }),
-  }).then((r) => r.json()).then((b) => {
-    if (!b?.result?.ok) throw new Error(method + ': ' + JSON.stringify(b?.result?.error))
-    return b.result.value
-  })
 const listV = await rpc('session.list', {})
 const augm = listV.items.filter((s) => String(s.sessionId).startsWith('augmentor-'))
 if (!augm.length) fail('no augmentor-* session in session.list — session.create never landed')
@@ -234,16 +237,26 @@ if (probeData.fenced?.status !== 403) fail(`fence row expected 403, got ${probeD
 process.stderr.write(`[m2] probe: api=${probeData.api?.status} root=${probeData.root?.status} fenced=${probeData.fenced?.status}\n`)
 
 // ---------- 6. Reopen the marker session (M1 regression: render) ----------
-// The section-2 probe session (marker in its derived title) is the target —
-// no pinned external session id.
-const rowSel3 = `[...document.querySelectorAll(".sp-row")].find(r => (r.querySelector(".sp-title")?.textContent ?? "").includes(${JSON.stringify(MARKER)}))`
+// The section-2 probe session is the target — no pinned external session
+// id. Match by SESSION ID (data-session-id), not title: the DSH app
+// rewrites session titles asynchronously after the turn (the marker title
+// gets replaced by the assistant's first line), so a title match races it.
+let SID6 = null
+for (let i = 0; i < 30; i++) {
+  await sleep(500)
+  const now = new Set((await rpc('session.list', {})).items.map((s) => s.sessionId))
+  const fresh = [...now].filter((id) => !idsBefore.has(id))
+  if (fresh.length === 1) { SID6 = fresh[0]; break }
+}
+if (!SID6) fail('M1 regression: new session did not appear in session.list')
+const rowSel3 = `[...document.querySelectorAll(".sp-row")].find(r => r.dataset.sessionId === ${JSON.stringify(SID6)})`
 let rowFound3 = false
 for (let i = 0; i < 20; i++) {
   await sleep(500)
   rowFound3 = await ev(`!!(${rowSel3})`)
   if (rowFound3) break
 }
-if (!rowFound3) fail('M1 regression: marker session row not found')
+if (!rowFound3) fail('M1 regression: marker session row (by session id) not found')
 await ev(`${rowSel3}.click()`)
 let logText2 = ''
 for (let i = 0; i < 60; i++) {

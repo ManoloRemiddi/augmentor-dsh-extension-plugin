@@ -18,11 +18,10 @@
 //      TARGET_SESSION (session id for the history step; default: first listed),
 //      DSH_BASE_URL (inherited by the pipe; default http://127.0.0.1:3080).
 import { spawn } from 'node:child_process'
-import vm from 'node:vm'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 
 const AUG = path.dirname(path.dirname(fileURLToPath(import.meta.url)))
 const EXT = path.join(AUG, 'extension')
@@ -103,17 +102,22 @@ const chrome = {
   scripting: { executeScript: (_i, cb) => cb && cb([]) },
 }
 
-// ---------- SW context ----------
-const sandbox = {
-  console,
-  setTimeout, clearTimeout, setInterval, clearInterval,
-  crypto, URL, TextEncoder, TextDecoder, fetch,
-  chrome,
-  self: { location: { origin: `chrome-extension://${EXT_ID}` } },
+// ---------- SW context (F1: sw.js is now a MODULE entry) ----------
+// The old harness ran the classic sw.js in a vm sandbox; a module service
+// worker (manifest "type": "module") has static imports, which
+// vm.runInContext cannot execute. Node's own ESM loader plays Chrome's
+// module-SW role: define the chrome shim + the SW-only globals, then
+// dynamic-import sw.js — one module instance, exactly like Chrome
+// evaluates the import graph once on SW boot.
+// F5: before that, assert the extension's wire.mjs is the BYTE-IDENTICAL
+// copy of the repo-root file (the sw-e2e boot check the split relies on —
+// the three runtimes must speak the same dialect).
+if (!fs.readFileSync(path.join(EXT, 'wire.mjs')).equals(fs.readFileSync(path.join(AUG, 'wire.mjs')))) {
+  fail('extension/wire.mjs diverged from the repo-root wire.mjs (copy the root file, never edit the copy)')
 }
-sandbox.importScripts = (f) => vm.runInContext(fs.readFileSync(path.join(EXT, f), 'utf8'), ctx)
-const ctx = vm.createContext(sandbox)
-vm.runInContext(fs.readFileSync(path.join(EXT, 'sw.js'), 'utf8'), ctx)
+globalThis.chrome = chrome
+globalThis.self = { location: { origin: `chrome-extension://${EXT_ID}` } }
+await import(pathToFileURL(path.join(EXT, 'sw.js')).href)
 process.stderr.write(`[harness] sw.js loaded; runtime listeners: ${runtimeListeners.length}\n`)
 if (runtimeListeners.length === 0) fail('no runtime.onMessage listener registered by sw.js')
 const swHandler = runtimeListeners[runtimeListeners.length - 1]

@@ -32,17 +32,18 @@
  * gets there first — the plugin or the pipe read the same file). With no
  * token resolvable the channel is open, which is logged as a warning.
  *
- * Pipe frame vocabulary (one JSON object per WS message):
- *   pipe → plugin: {type: 'hello', name, version}
- *                   {type: 'request', id, method: 'browser/execute', params}
- *                   {type: 'request', id, method: 'augmentor/save'|'augmentor/unsave'|
+ * Pipe frame vocabulary (one JSON object per WS message) — the canonical
+ * wording lives in wire.mjs (F5): the three runtimes (pipe, plugin,
+ * extension SW) share one codec + pending table from that file.
+ *   plugin → pipe: {type: 'welcome', name, protocol, version} (once, on connect)
+ *                  {type: 'request', id, method: 'browser/execute', params}
+ *                  {type: 'reply', id, result | error: {message}}
+ *   pipe → plugin: {type: 'request', id, method: 'augmentor/save'|'augmentor/unsave'|
  *                                        'augmentor/state', params}
- *   plugin → pipe: {type: 'welcome', name, version}
- *                  {type: 'reply', id, result}
- *                  {type: 'reply', id, error: {message}}
- * browser/execute requests are broadcast to every connected pipe; the first
- * reply settles the waiter, later replies are dropped as late. augmentor/*
- * requests are answered by the plugin itself (no browser involved).
+ *                  {type: 'reply', id, result | error: {message}}
+ * browser/execute goes to the ACTIVE pipe only (the most recently connected —
+ * S6); its reply must come from that same socket. augmentor/* requests are
+ * answered by the plugin itself (no browser involved).
  */
 import type { Context } from '@deepseek-ai/cordis'
 import type { IncomingMessage, ServerResponse } from 'node:http'
@@ -55,6 +56,10 @@ import z from '@deepseek-ai/schemastery'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { WebSocketServer } from 'ws'
 import type { WebSocket } from 'ws'
+// F5 (audit): shared frame codec + pending table. The canonical file lives
+// at the repo root (next to pipe.mjs); the esbuild prepare script bundles it
+// into dist/index.js so installed copies never resolve it at runtime.
+import { decode as wireDecode, encode as wireEncode, Pending } from '../../wire.mjs'
 
 export const name = 'dsh-augmentor'
 // 'workspaceRegistry' and 'sessionPersistence' are declared so the loader
@@ -297,11 +302,13 @@ interface SessionPersistenceLike {
 export function apply(ctx: Context, config: Config) {
   const pipes = new Set<WebSocket>()
   // S6 (audit): each in-flight round trip is bound to the socket it was sent
-  // on. The old map was keyed by id alone, so ANY connected token holder
-  // could forge a reply for an in-flight id (requests were broadcast to
-  // every pipe, so every pipe knew every id) and settle the waiter with
-  // fabricated browser results.
-  const pending = new Map<string, { settle: (value: BrowserRoundTrip) => void; socket: WebSocket }>()
+  // on (Pending's `bind`). The old map was keyed by id alone, so ANY
+  // connected token holder could forge a reply for an in-flight id and
+  // settle the waiter with fabricated browser results. F5 (audit): the
+  // table itself is the shared wire Pending (repo-root wire.mjs) — timeout,
+  // settle-once, and drop-by-socket semantics in one place with the pipe
+  // and the extension.
+  const pending = new Pending()
   const wss = new WebSocketServer({ noServer: true })
 
   /**
@@ -318,33 +325,19 @@ export function apply(ctx: Context, config: Config) {
 
   /** One round trip through the active pipe to the browser, or a clean no-client error. */
   function browserRequest(params: Record<string, unknown>, timeoutMs: number): Promise<BrowserRoundTrip> {
-    return new Promise((resolve) => {
-      const target = activePipe()
-      if (!target) {
-        resolve({ ok: false, error: 'no browser client connected' })
-        return
-      }
-      const id = randomUUID()
-      const timer = setTimeout(() => {
-        pending.delete(id)
-        resolve({ ok: false, error: `browser round trip timed out after ${timeoutMs}ms` })
-      }, timeoutMs)
-      pending.set(id, {
-        socket: target,
-        settle(value: BrowserRoundTrip) {
-          clearTimeout(timer)
-          pending.delete(id)
-          resolve(value)
-        },
-      })
-      if (target.readyState === target.OPEN) {
-        target.send(JSON.stringify({ type: 'request', id, method: 'browser/execute', params }))
-      } else {
-        pending.delete(id)
-        clearTimeout(timer)
-        resolve({ ok: false, error: 'browser client disconnected' })
-      }
-    })
+    const target = activePipe()
+    if (!target) return Promise.resolve({ ok: false, error: 'no browser client connected' })
+    const id = randomUUID()
+    // Pending resolves on the reply's result and REJECTS on timeout / socket
+    // drop — the catch below folds those into the always-resolve
+    // {ok:false,error} contract the tools expect.
+    const roundTrip = pending.add(id, { bind: target, timeoutMs })
+    if (target.readyState === target.OPEN) {
+      target.send(wireEncode({ type: 'request', id, method: 'browser/execute', params }))
+    } else {
+      pending.settle(id, { ok: false, error: 'browser client disconnected' }, null)
+    }
+    return roundTrip.catch((e: Error) => ({ ok: false, error: e.message }) as BrowserRoundTrip)
   }
 
   // ----------------------------------------------------- M3 chat lifecycle
@@ -387,7 +380,7 @@ export function apply(ctx: Context, config: Config) {
   async function handlePipeRequest(source: WebSocket, frame: { id: string; method: string; params?: Record<string, unknown> }): Promise<void> {
     const id = frame.id
     const reply = (out: Record<string, unknown>) => {
-      if (source.readyState === source.OPEN) source.send(JSON.stringify({ type: 'reply', id, result: out }))
+      if (source.readyState === source.OPEN) source.send(wireEncode({ type: 'reply', id, result: out }))
     }
     try {
       const sessionId = String(frame.params?.sessionId ?? '')
@@ -482,14 +475,10 @@ export function apply(ctx: Context, config: Config) {
 
   wss.on('connection', (pipe: WebSocket) => {
     pipes.add(pipe)
-    pipe.send(JSON.stringify({ type: 'welcome', name: 'dsh-augmentor', protocol: PROTOCOL, version: VERSION }))
+    pipe.send(wireEncode({ type: 'welcome', name: 'dsh-augmentor', protocol: PROTOCOL, version: VERSION }))
     pipe.on('message', (data) => {
-      let frame: { type?: string; id?: string; method?: string; params?: Record<string, unknown>; result?: unknown; error?: { message?: string } }
-      try {
-        frame = JSON.parse(String(data))
-      } catch {
-        return // non-JSON frames are outside the pipe vocabulary
-      }
+      const frame: { type?: string; id?: string; method?: string; params?: Record<string, unknown>; result?: unknown; error?: { message?: string } } | null = wireDecode(String(data))
+      if (!frame || typeof frame !== 'object') return // non-JSON frames are outside the pipe vocabulary
       if (frame.type === 'request' && frame.id !== undefined && frame.method) {
         // The extension's lifecycle requests (save/unsave/state) arrive as
         // forwarded pipe frames; the plugin answers them itself.
@@ -497,19 +486,18 @@ export function apply(ctx: Context, config: Config) {
         return
       }
       if (frame.type !== 'reply' || frame.id === undefined) return
-      const waiter = pending.get(frame.id)
-      if (!waiter) return // late reply after the timeout already settled the waiter
-      if (waiter.socket !== pipe) return // S6: the reply must come from the socket the request went to
-      if (frame.error) waiter.settle({ ok: false, error: frame.error.message ?? 'browser error' })
-      else waiter.settle({ ok: true, result: frame.result })
+      const entry = pending.get(frame.id)
+      if (!entry) return // late reply after the timeout already settled the waiter
+      if (entry.bind !== pipe) return // S6: the reply must come from the socket the request went to
+      if (frame.error) pending.settle(frame.id, undefined, new Error(frame.error.message ?? 'browser error'))
+      else pending.settle(frame.id, { ok: true, result: frame.result } as BrowserRoundTrip, null)
     })
     const drop = () => {
       pipes.delete(pipe)
       // Settle the in-flight round trips bound to this socket instead of
-      // letting them hang out the full command timeout.
-      for (const [id, waiter] of [...pending]) {
-        if (waiter.socket === pipe) waiter.settle({ ok: false, error: 'browser client disconnected' })
-      }
+      // letting them hang out the full command timeout (F5: Pending does the
+      // per-socket drop; browserRequest folds the rejection into ok:false).
+      pending.dropWhere((e) => e.bind === pipe, new Error('browser client disconnected'))
     }
     pipe.on('close', drop)
     pipe.on('error', drop)

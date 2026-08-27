@@ -1,11 +1,48 @@
 {
   "name": "dsh-augmentor",
-  "version": "0.1.0",
-  "description": "Augmentor bridge plugin: /api handshake route, pipe WS channel, and browser tools for the DSH web host.",
+  "version": "0.1.26",
+  "description": "Augmentor for DeepSeek Harness: DSH plugin + Chrome extension that drives the user's real browser from any DSH session — live page snapshot, click, type, tabs — with save-to-workspace chat sessions.",
   "type": "module",
-  "private": true,
-  "main": "src/index.ts",
-  "dsh.bundle.patch": "./cordis.patch.yml",
+  "main": "dist/index.js",
+  "license": "MIT",
+  "author": {
+    "name": "Manolo Remiddi",
+    "email": "manolorem@gmail.com"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ManoloRemiddi/augmentor-dsh-extension-plugin.git",
+    "directory": "plugin"
+  },
+  "keywords": [
+    "dsh",
+    "deepseek-harness",
+    "dsh-plugin",
+    "browser",
+    "browser-automation",
+    "chrome-extension",
+    "native-messaging",
+    "ai-agent"
+  ],
+  "engines": {
+    "node": ">=22.18.0"
+  },
+  "files": [
+    "dist",
+    "cordis.patch.yml",
+    "README.md"
+  ],
+  "scripts": {
+    "prepare": "esbuild src/index.ts --bundle --platform=node --format=esm --target=node22 --outfile=dist/index.js"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "publishConfig": {
+    "access": "public"
+  },
   "dependencies": {
     "@deepseek-ai/dsh-tools": "0.1.1-rc.2",
     "@deepseek-ai/schemastery": "3.18.1",
@@ -17,6 +54,7 @@
   "devDependencies": {
     "@deepseek-ai/cordis": "4.0.1",
     "@types/node": "24.10.1",
-    "@types/ws": "8.18.1"
+    "@types/ws": "8.18.1",
+    "esbuild": "^0.28.2"
   }
 }
