@@ -1426,5 +1426,25 @@ browser SVG carries explicit width/height attributes (20px / 44px) so it
 stays small even with missing CSS, and the stylesheet is version-busted
 (`style.css?v=3`) — the "huge logos" report was exactly the stale-CSS case.
 
+Site 7a1c2be (real logos): per user, all 8 hand-drawn flat SVGs were replaced
+with the official browser marks. Sources: Wikimedia Commons — Chrome "Google
+Chrome icon (February 2022)" (1.4 KB), Edge "Microsoft Edge logo (2019)"
+(3.8 KB, the current wave logo — Commons has no 2015-era file for this, found
+via the en.wikipedia infobox), Brave "Brave Logo (2024)" (cropped to the
+shield, the Commons file is the 129×40 lockup), Opera "Opera browser logo
+2013" (drop-shadow ellipse stripped), Vivaldi "Vivaldi web browser logo", Arc
+"Arc (browser) logo", Firefox "Firefox logo, 2019" (10.2 KB). Safari has no
+official SVG anywhere public (not on Commons, not on Simple Icons), so it is
+the official compass geometry from Simple Icons' `safari` path in white on a
+radial Apple-blue disc — closest legitimate rendering. All 8 live in ONE
+hidden `<symbol>` sprite at the top of `<body>` (39 KB), each with
+namespaced gradient ids (chrome-a, edge-b, brave-a, opera-paint1_… etc.) so
+nothing collides across the 16 in-page uses; every logo instance is a tiny
+`<svg width/height><use href="#logo-…"/></svg>` — explicit width/height kept
+(stale-CSS hardening), titles/aria-labels unchanged. Verified live: 200,
+8 sprite symbols, 16 use-refs, zero hand-drawn leftovers, `style.css?v=4`
+in index + docs. Playwright geometry check: 8×20px hero + 8×44px section,
+all use-refs resolving, all symbol bboxes non-empty.
+
 Note: `augmentor/README.md` (product repo) is badly stale (M0 sidecar, local
 DSH clone, `session/interrupt` patches) — not part of this pass.
