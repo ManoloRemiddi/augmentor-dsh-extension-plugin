@@ -1403,5 +1403,15 @@ good agentic behaviour, but the long answer overflowed the panel page, so the
 shot was re-taken with the v3 needle prompt (site commit 8984bed; v2 was
 8b03f75).
 
+Site ea6bd33 (after the v3 re-shoot): added a "YOUR BROWSER" section between
+PROOF and INSTALL — a "✓ Works today" board (Chrome, Edge, Brave, Opera,
+Vivaldi, Arc + "…any other Chromium build" chip, and an About-page hint for
+people who don't know their browser is Chromium-based) and a "Coming soon"
+board (Firefox, Safari, with the standard-MV3-same-codebase note); nav anchor
+plus the FAQ's "Which browsers and models work?" updated. Inline SVG logos,
+no external assets (per user: people on non-Chromium browsers should see
+their browser is coming, people who don't know "Chromium" should be able to
+recognise their own browser).
+
 Note: `augmentor/README.md` (product repo) is badly stale (M0 sidecar, local
 DSH clone, `session/interrupt` patches) — not part of this pass.
