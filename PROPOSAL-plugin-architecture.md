@@ -1413,12 +1413,18 @@ no external assets (per user: people on non-Chromium browsers should see
 their browser is coming, people who don't know "Chromium" should be able to
 recognise their own browser).
 
-Site 973f9b4 (follow-up): the same signal, compact, at the top — a
-`.compat-strip` under the hero CTA buttons: the six Chromium-family logos at
-26px with green "works today" ticks, a divider, Firefox + Safari dimmed with
-a mono "coming soon" tag, and a one-line caption linking to the full
-#browsers section. Flat-colour mini SVGs (no gradient defs, so no id
-collisions with the full-size logos further down the page).
+Site 973f9b4 + eb34db0 + 1d14909 (follow-up): the same signal, compact, at
+the top — a `.compat-strip` under the hero CTA buttons: the six
+Chromium-family logos at 20px, a thin divider, Firefox + Safari dimmed with a
+tiny mono "coming soon" tag, and a short faint caption ("Works in any
+Chromium-based browser · which one is yours?") linking to the full #browsers
+section. First shipped at 26px with green "works" ticks; user asked for
+"really minimal and small", so 1d14909 shrank to 20px and dropped the ticks.
+Flat-colour mini SVGs (no gradient defs, so no id collisions with the
+full-size logos further down the page). Hardened for stale caches: every
+browser SVG carries explicit width/height attributes (20px / 44px) so it
+stays small even with missing CSS, and the stylesheet is version-busted
+(`style.css?v=3`) — the "huge logos" report was exactly the stale-CSS case.
 
 Note: `augmentor/README.md` (product repo) is badly stale (M0 sidecar, local
 DSH clone, `session/interrupt` patches) — not part of this pass.
