@@ -31,7 +31,7 @@
 
 import { spawn } from 'node:child_process'
 import { createServer } from 'node:http'
-import { randomBytes } from 'node:crypto'
+import { createHash, randomBytes, timingSafeEqual } from 'node:crypto'
 import { mkdirSync, readFileSync, writeFileSync, appendFileSync, existsSync, readdirSync, unlinkSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import os from 'node:os'
@@ -82,7 +82,17 @@ function loadDotEnv(file) {
 
 const dotenv = loadDotEnv(path.join(BASE, '.env'))
 const persona = readFileSync(path.join(BASE, 'persona.md'), 'utf8')
-const SECRET = randomBytes(8).toString('hex')
+// S1 (audit): 128 bits — this secret IS browser control (whoever holds it
+// can drive the real tabs). The endpoint file carrying it gets 0600 below.
+const SECRET = randomBytes(32).toString('hex')
+
+/** S9: constant-time secret comparison (digests: equal length, no early-out). */
+function secretEquals(presented, expected) {
+  if (typeof presented !== 'string' || presented === '') return false
+  const a = createHash('sha256').update(presented).digest()
+  const b = createHash('sha256').update(expected).digest()
+  return timingSafeEqual(a, b)
+}
 
 // ------------------------------------------- model catalog (the DSH app's)
 // The picker lists the DSH app's own model set: the `llm-pi-ai:` provider
@@ -306,7 +316,7 @@ const httpServer = createServer((req, res) => {
     res.writeHead(404).end()
     return
   }
-  if (req.headers['x-augmentor-secret'] !== SECRET) {
+  if (!secretEquals(req.headers['x-augmentor-secret'], SECRET)) {
     res.writeHead(403).end(JSON.stringify({ ok: false, error: 'bad secret' }))
     return
   }
@@ -492,7 +502,9 @@ httpServer.listen(0, '127.0.0.1', () => {
   // the relay coordinates. Registration is keyed by this instance's pid: a
   // second bridge instance (reconnect, manual run) registers its own file and
   // cannot clobber this one.
-  writeFileSync(ENDPOINT_FILE, JSON.stringify({ pid: process.pid, url: `http://127.0.0.1:${port}`, secret: SECRET, startedAt: new Date().toISOString() }))
+  // S1 (audit): mode 0600 — the endpoint file carries the browser-control
+  // secret; a 0644 file let any local process read it.
+  writeFileSync(ENDPOINT_FILE, JSON.stringify({ pid: process.pid, url: `http://127.0.0.1:${port}`, secret: SECRET, startedAt: new Date().toISOString() }), { mode: 0o600 })
   trace('bridge', { event: 'browser-relay-listening', port, endpointFile: `trace/bridge-endpoints/${process.pid}.json` })
   spawnRuntime()
 })

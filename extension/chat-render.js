@@ -33,7 +33,34 @@ function escapeHtml(s) {
 function md(text) {
   // Escape first: no raw-HTML injection from model/tool output; markdown
   // (headings, bold, code, lists, links) still renders via marked.
-  return window.marked.parse(escapeHtml(text ?? ''), { gfm: true })
+  return sanitizeLinks(window.marked.parse(escapeHtml(text ?? ''), { gfm: true }))
+}
+
+// S4 (audit): escaping neutralizes raw HTML, but MARKDOWN link syntax
+// survives — `[x](javascript:…)` reaches the DOM as a live
+// <a href="javascript:…">. Today only the MV3 default CSP blocks that;
+// this is the second layer (a CSP relaxation or a future rendering context
+// must not turn model output into script). After escapeHtml, the only
+// remaining obfuscation is GFM's URL whitespace-stripping (java\tscript:)
+// plus the URL-spec control-character trim — so check the href after
+// decoding our four entities and stripping C0 controls.
+const SAFE_HREF_RE = /^(?:https?|mailto|tel|ftp|ssh|sftp):/i
+function cleanHref(raw) {
+  let s = raw
+  for (const [ent, ch] of [['&amp;', '&'], ['&lt;', '<'], ['&gt;', '>'], ['&quot;', '"']]) {
+    s = s.split(ent).join(ch)
+  }
+  return s.replace(/[\u0000-\u0020]/g, '')
+}
+function sanitizeLinks(html) {
+  return html.replace(/<a\s+href=(["'])(.*?)\1>/gi, (m, q, raw) => {
+    const href = cleanHref(raw)
+    if (href.startsWith('//')) return m // protocol-relative: resolves against chrome-extension:// — inert
+    if (SAFE_HREF_RE.test(href)) return m
+    // Unsafe scheme (javascript:, data:, vbscript:, bare-relative tricks):
+    // keep the visible text, kill the target.
+    return m.replace(q + raw + q, q + '#' + q)
+  })
 }
 
 function blockText(content) {

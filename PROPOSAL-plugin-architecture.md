@@ -1571,5 +1571,57 @@ pixel-render shows the three distinct glyphs + CTA block; 390px —
 display:none, no overflow, CTA intact; docs page same 3 hrefs, no
 overflow; live 200, v12 byte-exact (34811 B), footer-social intact.
 
+Code-audit Tier 1 (security hardening, 2026-08-27): the full audit (security
+S1–S15, DSH-compat D1–D5, practices F1–F11) was implemented in tiers; this
+entry is Tier 1, all verified against the live deployment.
+- S5: sw.js validates the `chrome.runtime.onMessage` sender (`sender.id ===
+  chrome.runtime.id` + a `chrome-extension://<id>` url). The panel renders
+  content from OTHER DSH sessions, so a hostile link rendered there must not
+  reach the message handlers (prompt/stop/settings-mutate/any-session-history).
+  The VM-shim e2e tests now pass a Chrome-faithful sender, as real Chrome does
+  for the extension's own pages.
+- S4: chat-render's `md()` now post-parse-sanitizes `<a href>` — allowlist
+  (https?/mailto/tel/ftp/ssh/sftp) checked after decoding the four escapeHtml
+  entities and stripping C0 controls/whitespace; unsafe hrefs (javascript:,
+  data:, and relative links like `sidepanel.html?task=…`) keep the visible
+  text but the target is dropped to `#`. escapeHtml-first already kills raw
+  HTML and entity obfuscation; this closes the GFM whitespace-strip
+  (`java\tscript:`) path and the relative-link-into-the-panel surface, as a
+  second layer under the MV3 CSP.
+- S3: the trace dir is created 0700 (best-effort chmod on a pre-existing
+  0755 dir at every boot), trace files are written 0600, and each serialized
+  line is redacted before hitting disk (credential-shaped JSON values
+  password/secret/token/api_key/authorization/cookie, `sk-…` keys, `token=`
+  query params).
+- S12: `dsh()` validates the method against
+  `^[a-z][a-z0-9_-]*(?:[./][a-z0-9_-]+)*$` — the method is interpolated into
+  the URL path; `..`, leading dots and stray path characters are rejected.
+- S7: the WS token now rides the `x-augmentor-token` handshake header; the
+  plugin prefers the header and keeps `?token=` as a legacy fallback. The pipe
+  sends BOTH for now — the running DSH app may still hold the old query-only
+  plugin until its ESM cache is busted; drop the query shim once the plugin
+  has been reloaded.
+- S9: bridge.mjs and plugin index.ts compare secret/token with
+  `timingSafeEqual` over sha256 digests (equal length, no early-out).
+- S1: the bridge relay secret is 128 bits (was 64) and its endpoint file is
+  written 0600 (was 0644) — that file IS browser control.
+- F7: VERSION is no longer hand-duplicated: pipe.mjs reads
+  `extension/manifest.json` (0.1.25) and the plugin reads its own
+  `package.json` (via a query-stripped `import.meta.url`, so the `?src=…`
+  home-patch freshness trick stays safe).
+- F8: the fence probe hits `state.endpoint` (what the pipe reports in the
+  handshake) instead of hardcoded 127.0.0.1:3080 — a non-default DSH port no
+  longer silently breaks the probe.
+- panel-e2e de-drift: the render target was a hardcoded live session id that
+  drifted out of the popover's 20-row window (the row matcher then fell back
+  to the last row and asserted text from a session that was never opened —
+  reproduced on pristine HEAD too). The suite is now hermetic: it sends a
+  unique marker prompt, asserts the user bubble + assistant prose render,
+  reopens the session by its marker title from the popover and asserts the
+  history replay, then archives the probe session (same pattern as m3-e2e).
+Verified: `node --check` on every touched file; m3-e2e (real Chrome) OK;
+sw-e2e OK; panel-e2e OK; plugin/tests/boot/run.sh ALL PASS (incl. the
+wrong-token-refused / right-token-welcomed handshake paths).
+
 Note: `augmentor/README.md` (product repo) is badly stale (M0 sidecar, local
 DSH clone, `session/interrupt` patches) — not part of this pass.

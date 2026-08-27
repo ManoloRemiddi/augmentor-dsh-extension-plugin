@@ -968,7 +968,15 @@ function waitForLoad(tabId, expectedUrl, timeoutMs = 20000) {
 }
 
 // ------------------------------------------------------------- messages
-chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  // S5 (audit): accept messages only from this extension's own pages.
+  // chrome.runtime.onMessage is unreachable from other extensions or the
+  // web, but the panel renders content from OTHER DSH sessions — a hostile
+  // link rendered there (see the chat-render S4 sanitize) could otherwise
+  // find a script context with sendMessage access. Defense in depth: verify
+  // the sender is one of our own chrome-extension:// pages.
+  if (!sender || sender.id !== chrome.runtime.id) return
+  if (!sender.url || !sender.url.startsWith('chrome-extension://' + chrome.runtime.id)) return
   if (msg?.type === 'connect') {
     ensurePort()
     sendResponse({
@@ -1361,10 +1369,13 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     // (/api/session.list — expected 403 forbidden: the fence refusal this
     // probe exists to document). Results are persisted by the pipe to
     // trace/fence-probe.json.
+    // F8 (audit): probe the endpoint the pipe actually reports (a
+    // non-default DSH port would break the old hardcoded 3080 silently).
+    const base = (state.endpoint || 'http://127.0.0.1:3080').replace(/\/+$/, '')
     const probePath = async (method, p, body) => {
       try {
         const t0 = Date.now()
-        const res = await fetch('http://127.0.0.1:3080' + p, { method, body })
+        const res = await fetch(base + p, { method, body })
         const text = await res.text()
         return { status: res.status, ok: res.ok, ms: Date.now() - t0, body: text.slice(0, 400) }
       } catch (e) {

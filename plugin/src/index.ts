@@ -47,7 +47,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { Duplex } from 'node:stream'
-import { randomBytes, randomUUID } from 'node:crypto'
+import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto'
 import { mkdirSync, realpathSync, rmSync, readFileSync, writeFileSync } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
@@ -153,7 +153,30 @@ function resolveToken(configured: string): { token: string; source: 'config' | '
 const PROTOCOL = 'augmentor-pipe/v1'
 
 /** Bundle version; the pipe logs the plugin-reported one in its trace. */
-const VERSION = '0.1.0'
+// F7 (audit): read from the package's own manifest (single source of truth)
+// instead of hand-duplicating. The file ships with the bundle both from the
+// source mount (M1) and from npm (M4). import.meta.url may carry the
+// home-patch `?src=…` freshness query — clear it before resolving.
+function packageVersion(): string {
+  try {
+    const here = new URL(import.meta.url)
+    here.search = ''
+    const p = JSON.parse(readFileSync(new URL('../package.json', here), 'utf8'))
+    return typeof p.version === 'string' && p.version ? p.version : 'unknown'
+  } catch {
+    return 'unknown'
+  }
+}
+const VERSION = packageVersion()
+
+/** S9 (audit): constant-time token comparison (digests: equal length, and
+ * the result does not reveal where the mismatch occurred). */
+function tokenEquals(presented: string | null, expected: string): boolean {
+  if (presented == null || presented === '') return false
+  const a = createHash('sha256').update(presented).digest()
+  const b = createHash('sha256').update(expected).digest()
+  return timingSafeEqual(a, b)
+}
 
 /** One pipe round-trip result. */
 interface BrowserRoundTrip {
@@ -495,13 +518,20 @@ export function apply(ctx: Context, config: Config) {
         path: config.wsPath,
         handler(req, socket, head) {
           if (resolved.token) {
-            let presented: string | null = null
-            try {
-              presented = new URL(req.url ?? '', 'http://localhost').searchParams.get('token')
-            } catch {
-              presented = null
+            // S7 (audit): prefer the handshake header — a query token lands
+            // in any request log the DSH app keeps. The query stays as a
+            // legacy fallback so an older pipe (which only sends ?token=)
+            // keeps working during a mixed upgrade.
+            let presented: string | null =
+              (req.headers['x-augmentor-token'] as string | undefined) ?? null
+            if (presented == null) {
+              try {
+                presented = new URL(req.url ?? '', 'http://localhost').searchParams.get('token')
+              } catch {
+                presented = null
+              }
             }
-            if (presented !== resolved.token) {
+            if (!tokenEquals(presented, resolved.token)) {
               console.warn('[dsh-augmentor] action channel upgrade rejected (bad or missing token)')
               socket.destroy()
               return

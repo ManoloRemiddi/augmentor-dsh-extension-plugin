@@ -118,12 +118,16 @@ process.stderr.write(`[harness] sw.js loaded; runtime listeners: ${runtimeListen
 if (runtimeListeners.length === 0) fail('no runtime.onMessage listener registered by sw.js')
 const swHandler = runtimeListeners[runtimeListeners.length - 1]
 
-// Drive the panel: send(msg) -> response (async sendResponse supported)
+// Drive the panel: send(msg) -> response (async sendResponse supported).
+// The sender mirrors what real Chrome passes for the extension's OWN pages
+// (id + chrome-extension:// url) — sw.js now validates the sender (audit S5),
+// so the shim must be Chrome-faithful or every message is (correctly) dropped.
+const panelSender = { id: EXT_ID, url: `chrome-extension://${EXT_ID}/sidepanel.html`, tab: { id: 1 } }
 function send(msg) {
   return new Promise((resolve) => {
     let settled = false
     const done = (v) => { if (!settled) { settled = true; resolve(v) } }
-    const ok = swHandler(msg, { tab: { id: 1 } }, done)
+    const ok = swHandler(msg, panelSender, done)
     if (ok === true) setTimeout(() => done(undefined), 30000)
     else done(undefined)
   })

@@ -42,15 +42,27 @@
  * under the 1 MiB native-messaging wire limit. See the function comment.
  */
 import { readFileSync, writeFileSync } from 'node:fs'
-import { readFile, mkdir } from 'node:fs/promises'
+import { readFile, mkdir, chmod } from 'node:fs/promises'
 import path from 'node:path'
 import os from 'node:os'
 import { fileURLToPath } from 'node:url'
 import { randomBytes } from 'node:crypto'
 import WebSocket from 'ws'
 
-const VERSION = '0.1.0'
 const AUGMENTOR_DIR = path.dirname(fileURLToPath(import.meta.url))
+
+// F7 (audit): the sidecar's version tracks the extension's — read it from the
+// manifest the pipe always ships with (single source of truth) instead of
+// hand-duplicating a frozen '0.1.0'.
+function manifestVersion() {
+  try {
+    const m = JSON.parse(readFileSync(path.join(AUGMENTOR_DIR, 'extension', 'manifest.json'), 'utf8'))
+    return typeof m.version === 'string' && m.version ? m.version : 'unknown'
+  } catch {
+    return 'unknown' // bare copy without extension/ — never crash the pipe
+  }
+}
+const VERSION = manifestVersion()
 const TRACE_DIR = path.join(AUGMENTOR_DIR, 'trace')
 const DSH_BASE = (process.env.DSH_AUGMENTOR_URL ?? 'http://127.0.0.1:3080').replace(/\/+$/, '')
 const PLUGIN_WS_PATH = '/api/augmentor/ws'
@@ -99,7 +111,11 @@ function resolveToken() {
 // ---------------------------------------------------------------- trace
 const traceName = `pipe-${new Date().toISOString().replace(/[:.]/g, '-')}.jsonl`
 const traceFile = path.join(TRACE_DIR, traceName)
-await mkdir(TRACE_DIR, { recursive: true })
+await mkdir(TRACE_DIR, { recursive: true, mode: 0o700 })
+// S3 (audit): traces capture prompts, typed text and tool results — an
+// existing 0755 dir from before the mode fix still leaks them to other local
+// users, so tighten best-effort on every boot.
+try { await chmod(TRACE_DIR, 0o700) } catch { /* not the owner: leave as-is */ }
 // 0.1.18: the trace was growing without bound — one live session with the
 // GUI streaming through the pipe produced 212 MB in 17 minutes (every
 // downlink frame AND its ext<-pipe echo were writeFileSync'd to disk),
@@ -109,11 +125,25 @@ await mkdir(TRACE_DIR, { recursive: true })
 const TRACE_MAX_BYTES = 50 * 1024 * 1024
 let traceBytes = 0
 let traceCapped = false
+// S3 (audit): never let credential-shaped values land in a trace file.
+// Applied to the serialized line, so it catches any nesting level:
+// "…password": "…", sk-… keys, and token=… query params.
+const REDACT_VALUE_RE = /("(?:passw(?:or)?d|secret|token|api_?key|authorization|cookie)"\s*:\s*")([^"]*)"/gi
+const REDACT_SK_RE = /\bsk-[A-Za-z0-9_-]{12,}\b/g
+const REDACT_QUERY_RE = /([?&]token=)[^&\s"']{6,}/gi
+function redactTrace(line) {
+  // Callback signature: (match, group1, group2, offset, string) — the value
+  // quote is part of the match, so re-add it in the replacement.
+  return line
+    .replace(REDACT_VALUE_RE, (m, pre, val) => pre + (val ? '***redacted***' : '') + '"')
+    .replace(REDACT_SK_RE, 'sk-***redacted***')
+    .replace(REDACT_QUERY_RE, '$1***redacted***')
+}
 function trace(entry) {
   entry.at = Date.now()
   if (entry.kind === 'downlink' || entry.kind === 'ext<-pipe') return
   if (traceCapped) return
-  const line = JSON.stringify(entry) + '\n'
+  const line = redactTrace(JSON.stringify(entry)) + '\n'
   traceBytes += line.length
   if (traceBytes > TRACE_MAX_BYTES) {
     traceCapped = true
@@ -121,7 +151,7 @@ function trace(entry) {
     return
   }
   try {
-    writeFileSync(traceFile, line, { flag: 'a' })
+    writeFileSync(traceFile, line, { flag: 'a', mode: 0o600 }) // S3: owner-only
   } catch {
     /* tracing must never kill the pipe */
   }
@@ -136,6 +166,13 @@ const log = (...parts) => {
 let rpcSeq = 0
 /** One client request: POST /api/<method> with the client-request envelope. */
 async function dsh(method, payload = {}) {
+  // S12 (audit): the method is interpolated into the URL path — constrain it
+  // to the stock method shape (session.prompt, host.describe,
+  // trace/fence-probe, …). Dotted/slash-separated alphanumeric segments only;
+  // `..`, leading dots and stray path characters are rejected.
+  if (typeof method !== 'string' || !/^[a-z][a-z0-9_-]*(?:[./][a-z0-9_-]+)*$/i.test(method)) {
+    throw new Error(`dsh: refusing invalid method name ${JSON.stringify(method)}`)
+  }
   const rpcId = `pipe-${++rpcSeq}`
   const res = await fetch(`${DSH_BASE}/api/${method}`, {
     method: 'POST',
@@ -252,8 +289,14 @@ const WS_TOKEN = resolveToken()
 
 function openPluginWs() {
   if (pluginWs) return
-  const url = `${DSH_BASE.replace(/^http/, 'ws')}${PLUGIN_WS_PATH}${WS_TOKEN.token ? `?token=${encodeURIComponent(WS_TOKEN.token)}` : ''}`
-  const ws = new WebSocket(url)
+  // S7 (audit): the token rides a WS handshake header. The query param is a
+  // TEMPORARY legacy shim: the DSH app process may still hold the old plugin
+  // (query-only reader) until its ESM cache is busted, so we send both for
+  // now. Once the plugin has been reloaded, the shim may be dropped — a
+  // query token otherwise lands in any request log the DSH app keeps.
+  const tokenQ = WS_TOKEN.token ? `?token=${encodeURIComponent(WS_TOKEN.token)}` : ''
+  const url = `${DSH_BASE.replace(/^http/, 'ws')}${PLUGIN_WS_PATH}${tokenQ}`
+  const ws = new WebSocket(url, { headers: WS_TOKEN.token ? { 'x-augmentor-token': WS_TOKEN.token } : {} })
   pluginWs = ws
   ws.on('open', () => log('plugin ws connected', PLUGIN_WS_PATH))
   ws.on('message', (data) => {
