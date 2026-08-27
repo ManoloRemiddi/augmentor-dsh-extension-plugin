@@ -1498,5 +1498,21 @@ lines (distinct line tops), opacity settled at 1, gradient + glow computed
 styles present, 0 console errors, screenshot pixel-verified (white +
 emerald + amber all present); live 200, css v6 byte-exact (32875 B).
 
+Site b073c45 (hero h1 bugfix + tighter rows): user reported the gradient
+words ("real browser hands." = the last 2 lines) rendered as solid colour
+blocks, not text, and wanted the rows touching. Root cause: the scoped
+`.hero h1 .gradient-text` rule's `background` SHORTHAND resets
+background-clip to its initial border-box, cancelling the base
+`.gradient-text` clip:text — the gradient then painted the whole inline
+box. (First suspected the drop-shadow filter; live A/B in playwright
+proved the shorthand reset was the cause.) Fix: re-declare
+-webkit-background-clip:text + background-clip:text + transparent fill
+inside the scoped rule, drop the glow filter, and line-height 1.0 → 0.92
+so the 5 rows touch. CSS v8, bumped in index + docs. Verified: fresh
+playwright load — computed clip=text, animation still panning, no filter,
+leading ratio 0.920, 0 console errors, ASCII pixel-render of the gradient
+region shows legible glyphs with background gaps (vs. solid block before);
+live 200, css v8 byte-exact (33142 B).
+
 Note: `augmentor/README.md` (product repo) is badly stale (M0 sidecar, local
 DSH clone, `session/interrupt` patches) — not part of this pass.
