@@ -1446,5 +1446,19 @@ nothing collides across the 16 in-page uses; every logo instance is a tiny
 in index + docs. Playwright geometry check: 8×20px hero + 8×44px section,
 all use-refs resolving, all symbol bboxes non-empty.
 
+Site 0f57e29 (Opera correction): user flagged the Opera mark as wrong and
+supplied the correct artwork (toppng.com preview PNG). Analysis confirmed it:
+the Commons "Opera browser logo 2013" file has a narrow vertical hole (37% of
+width) — not the standard Opera O (measured 53% wide / 74% tall hole in the
+supplied image). Replaced the `logo-opera` symbol contents with a raster
+`<image href="assets/logo-opera.png">`: the supplied PNG processed (gray
+background removed via redness-based alpha, recoloured with a clean vertical
+gradient from the sampled ring endpoints #FA1A2B→#B20619, trimmed to the O's
+701×701 bbox, downscaled to 480×480, 16 KB, transparent). Only logo that is
+not pure vector; renders crisp at 20/44 px (480px source). Sprite comment and
+xlink namespace updated accordingly. Verified live: HTML 200, old vector
+symbol gone, assets/logo-opera.png 200 (15945 B byte-exact), card screenshot
+pixel-verified (221 red px at #F6192A after compositing).
+
 Note: `augmentor/README.md` (product repo) is badly stale (M0 sidecar, local
 DSH clone, `session/interrupt` patches) — not part of this pass.
