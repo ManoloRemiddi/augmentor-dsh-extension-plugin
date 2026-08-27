@@ -5,9 +5,13 @@
 //
 // Repo home: augmentor/test/chrome-e2e.mjs (uses plugin/node_modules/ws).
 // Env: E2E_PORT (default 9222), E2E_PROFILE (default /tmp/chrome-e2e-profile).
-// Asserts: 'connected', session rows, the 403 fence row (real fetch metadata),
-// conversation rendered (newest user text in the DOM), real-SW trace
-// fingerprint (c1 / augmentor/models first), max frame under the 1 MiB limit.
+// Asserts: auto-connect (send button enabled — 0.1.17 contract), session rows,
+// the 403 fence row (real fetch metadata — only a real browser Origin
+// produces it; the VM shims see 415), a hermetic marker conversation
+// rendered in the DOM (the old hardcoded target session drifted out of the
+// list and this suite asserted the wrong conversation), real-SW trace
+// fingerprint (c<n> ids), max frame under the 1 MiB limit. The marker
+// session is archived at the end.
 // Production components: real Chrome SW, real connectNative, real pipe, live
 // DSH server, real fetch metadata (Origin/sec-fetch-site -> the 403 fence row).
 import { spawn } from 'node:child_process'
@@ -17,13 +21,11 @@ import path from 'node:path'
 import { createRequire } from 'node:module'
 import { fileURLToPath } from 'node:url'
 const require = createRequire(import.meta.url)
-const WebSocket = require(path.join(AUG, 'plugin/node_modules/ws'))
-
 const AUG = path.dirname(path.dirname(fileURLToPath(import.meta.url)))
 const EXT = path.join(AUG, 'extension')
+const WebSocket = require(path.join(AUG, 'plugin/node_modules/ws'))
 const PORT = Number(process.env.E2E_PORT ?? 9222)
 const PROFILE = process.env.E2E_PROFILE ?? '/tmp/chrome-e2e-profile'
-const TARGET = 'session-71a131cc-dc6b-4adb-b022-8a25e561985a'
 const fail = (m) => { console.error('CHROME-E2E FAIL:', m); try { chromium?.kill() } catch {} ; process.exit(1) }
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 
@@ -112,10 +114,9 @@ for (let i = 0; i < 40; i++) {
   if (rs === 'complete') break
   await sleep(500)
 }
-if (!await ev('!!document.getElementById("connect")')) fail('sidepanel DOM not ready')
+if (!await ev('!!document.getElementById("title")')) fail('sidepanel DOM not ready')
 process.stderr.write('[e2e] sidepanel DOM ready — driving the real Chrome flow\n')
 
-// ---------- expected text (newest user message of the target session) ----------
 const rpc = (method, payload) =>
   fetch('http://127.0.0.1:3080/api/' + method, {
     method: 'POST', headers: { 'content-type': 'application/json' },
@@ -124,30 +125,17 @@ const rpc = (method, payload) =>
     if (!b?.result?.ok) throw new Error(method + ': ' + JSON.stringify(b?.result?.error))
     return b.result.value
   })
-const listV = await rpc('session.list', {})
-const listItem = listV.items.find((s) => s.sessionId === TARGET)
-const listTitle = listItem.projections?.values?.title ?? ''
-let expectedUserText = null
-for (const h of (await rpc('session.history', { sessionId: TARGET, maxMessages: 50 })).events ?? []) {
-  if (h.event?.type === 'user/message') {
-    const parts = h.event.data?.message?.content ?? h.event.data?.content
-    const text = (Array.isArray(parts) ? parts.filter((p) => p?.type === 'text').map((p) => p.text).join('') : String(parts ?? '')).trim()
-    if (text) expectedUserText = text.slice(0, 80) // last wins
-  }
-}
-if (!expectedUserText) fail('no user message found for the render assertion')
 
-// ---------- 1. Connect ----------
-await ev('document.getElementById("connect").click()')
-let status = null
+// ---------- 1. Auto-connect (no Connect button since 0.1.16) ----------
+// Readiness is the send button's enabled state (0.1.17).
+let ready = false
 for (let i = 0; i < 60; i++) {
   await sleep(500)
-  status = await ev('document.getElementById("status").textContent')
-  if (status === 'connected') break
-  if (String(status).startsWith('error')) fail(`panel error: ${status}`)
+  ready = await ev('!document.getElementById("send").disabled')
+  if (ready) break
 }
-if (status !== 'connected') fail(`never connected (status=${status})`)
-process.stderr.write(`[e2e] REAL Chrome: panel status "connected"\n`)
+if (!ready) fail('never connected (send stayed disabled)')
+process.stderr.write(`[e2e] REAL Chrome: send ready (auto-connect via real SW + pipe)\n`)
 
 // ---------- 2. Sessions ----------
 await ev('document.getElementById("sessions").click()')
@@ -171,26 +159,57 @@ for (let i = 0; i < 30; i++) {
 const probeData = JSON.parse(fs.readFileSync(probeFile, 'utf8'))
 process.stderr.write(`[e2e] REAL Chrome probe: api=${probeData.api?.status} root=${probeData.root?.status} fenced=${probeData.fenced?.status}\n`)
 
-// ---------- 4. Open the target conversation ----------
-const rowSel = `[...document.querySelectorAll(".sp-row")].find(r => r.querySelector(".sp-title")?.textContent === ${JSON.stringify(listTitle)})`
-const found = await ev(`!!(${rowSel})`)
-if (!found) fail('target row not found in real Chrome list')
-await ev(`${rowSel}.click()`)
+// ---------- 4. Hermetic marker conversation (rendered in real Chrome) ----------
+// The old version pinned a live session id; once it drifted out of the
+// popover window the suite asserted a conversation that was never opened.
+// Now: send a unique marker prompt, assert the user bubble + assistant prose
+// render, then archive the probe session.
+const MARKER = 'CHROME_E2E_OK_' + Math.random().toString(36).slice(2, 10)
+const PROMPT = `${MARKER} — reply with exactly one line: OK`
+const idsBefore = new Set((await rpc('session.list', {})).items.map((s) => s.sessionId))
+await ev(`(function(){ const i = document.getElementById('input'); i.value = ${JSON.stringify(PROMPT)}; document.getElementById('send').click(); return true })()`)
+process.stderr.write(`[e2e] marker prompt sent: ${JSON.stringify(MARKER)}\n`)
 let logText = ''
-for (let i = 0; i < 60; i++) {
+for (let i = 0; i < 120; i++) {
   await sleep(500)
   logText = await ev('document.getElementById("log").textContent') ?? ''
-  if (logText.includes(expectedUserText)) break
+  const prose = (await ev('[...document.querySelectorAll("#log .msg.assistant .md")].map(n=>n.textContent||"").join("")')) ?? ''
+  if (logText.includes(MARKER) && prose.trim()) break
 }
-const renderedUser = logText.includes(expectedUserText)
+const renderedUser = logText.includes(MARKER)
+// The new session must appear as a row titled from the marker prompt.
+await ev('document.getElementById("sessions").click()') // close if open
+await sleep(300)
+await ev('document.getElementById("sessions").click()') // reopen, fresh list
+let rowFound = false
+for (let i = 0; i < 20; i++) {
+  await sleep(500)
+  rowFound = await ev(`!![...document.querySelectorAll(".sp-row")].find(r => (r.querySelector(".sp-title")?.textContent ?? "").includes(${JSON.stringify(MARKER)}))`)
+  if (rowFound) break
+}
+if (!rowFound) fail('marker session row not in the real Chrome list')
+process.stderr.write(`[e2e] REAL Chrome: marker session row present in the popover\n`)
+process.stderr.write(`[e2e] log: ${logText.length} chars, userTextRendered=${renderedUser}\n`)
+
+// ---------- 5. Cleanup: archive the probe session ----------
+const idsAfter = new Set((await rpc('session.list', {})).items.map((s) => s.sessionId))
+const newIds = [...idsAfter].filter((id) => !idsBefore.has(id))
+if (newIds.length !== 1) fail(`expected exactly one new session, got ${JSON.stringify(newIds)}`)
+const SID = newIds[0]
+await rpc('workspace.archiveSession', { sessionId: SID })
+const archived = (await rpc('workspace.list', {})).archivedSessionIds ?? []
+if (!archived.includes(SID)) fail('probe session not archived', archived)
+process.stderr.write(`[e2e] cleanup: ${SID} archived\n`)
+
 const evidence = {
-  status: await ev('document.getElementById("status").textContent'),
+  status: (await ev('!document.getElementById("send").disabled')) ? 'ready' : 'not-ready',
   title: await ev('document.getElementById("title").textContent'),
   logChars: logText.length,
   userBubbles: await ev('document.querySelectorAll("#log .user").length'),
   assistantBubbles: await ev('document.querySelectorAll("#log .assistant").length'),
   renderedUserText: renderedUser,
-  expectedUserText,
+  marker: MARKER,
+  session: { id: SID, archived: true },
 }
 evidence.probe = { api: probeData.api?.status, root: probeData.root?.status, fenced: probeData.fenced?.status, persisted: true }
 
@@ -212,7 +231,7 @@ console.log(JSON.stringify(evidence, null, 1))
 if (!renderedUser) fail('conversation not rendered in real Chrome')
 if (probeData.fenced?.status !== 403) fail(`fence row expected 403 in real Chrome, got ${probeData.fenced?.status}`)
 if (String(firstExtFrame?.id ?? '').charAt(0) !== 'c') fail(`expected real-SW c<n> ids, got ${firstExtFrame?.id}`)
-console.error('CHROME-E2E: OK — real Chrome rendered the DSH conversation + produced the 403 fence row')
+console.error('CHROME-E2E: OK — real Chrome rendered the marker conversation + produced the 403 fence row')
 bws.close(); pws.close()
 chromium.kill()
 process.exit(0)

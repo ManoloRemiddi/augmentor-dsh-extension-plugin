@@ -1,3 +1,0 @@
-#!/bin/sh
-# dsh-browser — resolved via PATH by the dsh runtime's bash tool.
-exec node "$(dirname "$0")/../dsh-browser.mjs" "$@"

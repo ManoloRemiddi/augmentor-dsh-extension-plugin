@@ -1623,5 +1623,88 @@ Verified: `node --check` on every touched file; m3-e2e (real Chrome) OK;
 sw-e2e OK; panel-e2e OK; plugin/tests/boot/run.sh ALL PASS (incl. the
 wrong-token-refused / right-token-welcomed handshake paths).
 
+Code-audit Tier 2 (M0 retirement, S2/S6/S14/S15, D1/D2, e2e rework,
+2026-08-27): the second tier of the same audit.
+- M0 legacy deleted (10 files): bridge.mjs, cdp.mjs, dsh-browser.mjs,
+  bin/bridge-host.sh, bin/dsh-browser, bin-shim/pnpm (dir), extension/
+  popup.html + popup.js, persona.md, lab/model-picker-verify.mjs. The M0
+  sidecar bridge has been dead code since M1 (the pipe replaced it), and the
+  popup was superseded by the side panel. The manifest's action block never
+  carried a default_popup (title + icons only), so the popup removal needed
+  no version bump. persona.md was already ported into the five browser_*
+  tools' descriptions (noted in the preset yml). Reference scrub:
+  install-native-host.sh (bridge→pipe wording, dropped the dsh-browser
+  chmod line), sw.js / sidepanel.js header comments, preset yml comments —
+  grep-clean apart from two intentional provenance comments.
+- S6: pipe round trips are socket-bound. The plugin's pending map is keyed by
+  (id, socket); browserRequest sends to the ACTIVE pipe only (most recently
+  connected — two token holders is a misconfiguration, and the old
+  broadcast-to-every-browser was the worse failure); a reply is accepted only
+  from the socket the request went to; a dropped socket settles all its
+  pending entries as 'browser client disconnected'. sendToPipes removed
+  (zero references). Lifecycle replies go to the originating socket only.
+- S2: first-run approval-mode default in the side panel is workspace-write
+  (was danger-full-access). A new install gets the least-privilege default;
+  an existing install keeps its saved choice (the write happens only when the
+  stored value is null). Full access stays behind the existing confirm()
+  guard. Scope note: this setting governs DSH file/execution approvals — it
+  does not bind the agent model or gate the browser_* tools.
+- S14: the pipe's .env fallback parser now follows dotenv semantics — the
+  old capture kept ' # …' inline comments (and quote characters) inside the
+  value. Quoted values keep their interior verbatim; unquoted values strip
+  from the first ' #'; process env still wins.
+- S15: split-brain token race closed. First-boot creation of
+  $DSH_HOME/augmentor-ws-token was a non-atomic read→write in THREE places
+  (plugin, pipe, installer): two concurrent first boots could each generate a
+  different token and last-write-wins silently split the action channel. All
+  three now create with O_EXCL (wx): exactly one side wins, the loser
+  re-reads the winner (bounded retries across the mid-write window). The
+  installer's sh check-then-write became an atomic node one-liner where
+  EEXIST is not an error.
+- D1: documented, no code change. Verified against the cordis 4.0.1 source:
+  ctx.get(name) returns undefined for a service the profile does not provide
+  (cordis/lib/index.js:762 — never throws), and _checkImpl/_refresh
+  (1305/1314) mark the fiber INACTIVE when a declared inject is missing, so
+  the plugin's apply never runs. On non-web profiles (no workspaceRegistry)
+  dsh-augmentor is a silent no-op — no boot failure, no error log. That is
+  the safe, expected posture for a browser-only plugin.
+- D2: verified already done — plugin/package.json is fully pinned
+  (@deepseek-ai/dsh-tools 0.1.1-rc.2, @deepseek-ai/schemastery 3.18.1,
+  ws 8.21.0, peer cordis 4.0.1 + matching devDep; no carets). No change.
+- F3 (stale e2e): all three broken suites are fixed, not deleted — a full
+  read showed each carries coverage no other suite has. The shared breakage
+  was the 0.1.16/0.1.17 UI contract (#connect and #status were removed →
+  readiness is now the send button's enabled state, same as panel-e2e) plus
+  hardcoded live session ids that had drifted out of the popover list.
+  - tools-e2e (kept — the only cold-boot proof of all five browser_* tools
+    in order, with the veil, on an isolated dsh): send-button readiness,
+    stale header + deepseek-v4-flash model note → the local Qwen the
+    symlinked settings select today. Also: the isolated instance runs in a
+    different ENV than the live app — the deployment resolves its model
+    keys (e.g. DASH_LOCAL_QWEN_KEY) from the shell that launched `dsh web`,
+    and .credentials.yaml only holds the web-Models-page keys, so the
+    default-model turn died with MISSING_CREDENTIAL before any tool ran.
+    The suite now harvests key-shaped vars (names logged, values never)
+    from its own env + the live dsh process's /proc environ and passes
+    them to the isolated spawn; a MISSING_CREDENTIAL error strip now
+    fast-fails instead of burning the 420 s wait.
+  - chrome-e2e (kept — the only assertion of the 403 fence row via real
+    browser Origin; the VM shims see 415): hermetic marker conversation,
+    probe session archived at the end; also fixed a pre-existing TDZ crash
+    (AUG referenced before declaration — the suite could not even start).
+  - m2-e2e (kept — the only model-picker / session.selectModel exercise):
+    hermetic marker session (created, verified, reopened, archived); the
+    picker round-trip target is now DYNAMIC (any unselected row — the old
+    version pinned a remote model that may not be in the catalog).
+  Verified: node --check on every touched file; unit checks for the S14
+  parser (inline #, quotes, no-hash, env-wins) and the S15 create (race
+  loser re-reads winner, fresh 0600, second reader sees the same token);
+  plugin/tests/boot/run.sh ALL PASS; m3-e2e / sw-e2e / panel-e2e / chrome-
+  e2e / m2-e2e OK (chrome: 403 fence + marker render + c1 trace
+  fingerprint; m2: default-model turn, picker Qwen3.8-27B(local) →
+  DeepSeek-V4-Flash, marker reopen + archive); tools-e2e OK (isolated
+  cold boot: all five browser_* tools in order, veil seen, credential-env
+  harvest active).
+
 Note: `augmentor/README.md` (product repo) is badly stale (M0 sidecar, local
 DSH clone, `session/interrupt` patches) — not part of this pass.

@@ -1,8 +1,8 @@
 # The `augmentor` agent preset: the Augmentor browser agent — the persona the
-# old bridge carried as DSH_SYSTEM_PROMPT (augmentor/persona.md, ported to the
-# five browser_* tools), so a session named `augmentor` knows it drives the
-# user's real Chromium through the dsh-augmentor extension instead of
-# improvising.
+# retired M0 sidecar bridge carried as DSH_SYSTEM_PROMPT (persona.md, ported
+# into the five browser_* tools' descriptions), so a session named `augmentor`
+# knows it drives the user's real Chromium through the dsh-augmentor
+# extension instead of improvising.
 #
 # This file is an AGENT-PLANE composition, mounted once per process by the
 # preset roster; every session naming it joins by scope parentage. The
@@ -10,7 +10,7 @@
 # the root realm, so they reach every session on a host where the plugin is
 # mounted — what this preset owns is the identity and the surface.
 #
-# The surface mirrors the agent the old bridge provided: bash + fs + todo +
+# The surface mirrors the agent the retired M0 bridge provided: bash + fs + todo +
 # subagent, no background jobs, no skills, no goals, and no ask-user (the
 # side panel has no answer path for questions — an unanswered ask would stall
 # the turn). The plan-mode and compaction blocks are the deployment's standard

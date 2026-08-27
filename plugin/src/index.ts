@@ -48,7 +48,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { Duplex } from 'node:stream'
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto'
-import { mkdirSync, realpathSync, rmSync, readFileSync, writeFileSync } from 'node:fs'
+import { mkdirSync, realpathSync, rmSync, readFileSync, writeFileSync, openSync, writeSync, closeSync } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import z from '@deepseek-ai/schemastery'
@@ -130,23 +130,49 @@ export const Config: z<Config> = z.object({
 /** Per-machine action-channel secret: created 0600 on first boot, same path on both sides. */
 const TOKEN_FILE_NAME = 'augmentor-ws-token'
 
+const sleepSync = (ms: number) => {
+  try {
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms)
+  } catch {
+    /* worker-thread context: no Atomics.wait — spin without the delay */
+  }
+}
+
 function resolveToken(configured: string): { token: string; source: 'config' | 'file' | 'generated' | 'none' } {
   if (configured) return { token: configured, source: 'config' }
   const home = process.env.DSH_HOME ?? path.join(os.homedir(), '.dsh')
   const file = path.join(home, TOKEN_FILE_NAME)
-  try {
-    const existing = readFileSync(file, 'utf8').trim()
-    if (existing) return { token: existing, source: 'file' }
-  } catch {
-    /* first boot: generate */
+  const readExisting = (): string | null => {
+    try {
+      const existing = readFileSync(file, 'utf8').trim()
+      if (existing) return existing
+    } catch { /* missing */ }
+    return null
   }
+  const existing = readExisting()
+  if (existing) return { token: existing, source: 'file' }
+  // S15 (audit): first boot. The old read→write was racy — two first boots
+  // (plugin + pipe) could each generate a DIFFERENT token and last-write-wins
+  // split the channel silently. O_EXCL makes creation atomic: exactly one
+  // side wins; the loser re-reads the winner (retries while it mid-writes).
   const token = randomBytes(16).toString('hex')
   try {
-    writeFileSync(file, token + '\n', { mode: 0o600 })
-  } catch {
-    /* unresolvable home dir: fall back to an unshared ephemeral token */
+    const fd = openSync(file, 'wx', 0o600)
+    try { writeSync(fd, token + '\n') } finally { closeSync(fd) }
+    return { token, source: 'generated' }
+  } catch (e: any) {
+    if (e?.code !== 'EEXIST') {
+      /* unresolvable home dir: fall back to an unshared ephemeral token */
+      return { token, source: 'generated' }
+    }
+    for (let i = 0; i < 20; i++) {
+      const winner = readExisting()
+      if (winner) return { token: winner, source: 'file' }
+      sleepSync(5)
+    }
+    console.error(`[dsh-augmentor] token race: concurrent create, re-read came up empty — falling back to the local token (channel may reject it)`)
+    return { token, source: 'generated' }
   }
-  return { token, source: 'generated' }
 }
 
 /** Pipe protocol revision; the pipe logs it in its trace for fence-probe evidence. */
@@ -270,20 +296,31 @@ interface SessionPersistenceLike {
 
 export function apply(ctx: Context, config: Config) {
   const pipes = new Set<WebSocket>()
-  const pending = new Map<string, { settle: (value: BrowserRoundTrip) => void }>()
+  // S6 (audit): each in-flight round trip is bound to the socket it was sent
+  // on. The old map was keyed by id alone, so ANY connected token holder
+  // could forge a reply for an in-flight id (requests were broadcast to
+  // every pipe, so every pipe knew every id) and settle the waiter with
+  // fabricated browser results.
+  const pending = new Map<string, { settle: (value: BrowserRoundTrip) => void; socket: WebSocket }>()
   const wss = new WebSocketServer({ noServer: true })
 
-  function sendToPipes(frame: Record<string, unknown>): void {
-    const text = JSON.stringify(frame)
-    for (const pipe of pipes) {
-      if (pipe.readyState === pipe.OPEN) pipe.send(text)
-    }
+  /**
+   * The pipe that drives the browser: the most recently connected one (the
+   * last reconnection wins). With two token holders connected the old code
+   * broadcast the action to both browsers; driving exactly one —
+   * deterministically the newest — is the only sane semantics.
+   */
+  function activePipe(): WebSocket | undefined {
+    let last: WebSocket | undefined
+    for (const p of pipes) last = p
+    return last
   }
 
-  /** One round trip through the pipe to the browser, or a clean no-client error. */
+  /** One round trip through the active pipe to the browser, or a clean no-client error. */
   function browserRequest(params: Record<string, unknown>, timeoutMs: number): Promise<BrowserRoundTrip> {
     return new Promise((resolve) => {
-      if (pipes.size === 0) {
+      const target = activePipe()
+      if (!target) {
         resolve({ ok: false, error: 'no browser client connected' })
         return
       }
@@ -293,13 +330,20 @@ export function apply(ctx: Context, config: Config) {
         resolve({ ok: false, error: `browser round trip timed out after ${timeoutMs}ms` })
       }, timeoutMs)
       pending.set(id, {
+        socket: target,
         settle(value: BrowserRoundTrip) {
           clearTimeout(timer)
           pending.delete(id)
           resolve(value)
         },
       })
-      sendToPipes({ type: 'request', id, method: 'browser/execute', params })
+      if (target.readyState === target.OPEN) {
+        target.send(JSON.stringify({ type: 'request', id, method: 'browser/execute', params }))
+      } else {
+        pending.delete(id)
+        clearTimeout(timer)
+        resolve({ ok: false, error: 'browser client disconnected' })
+      }
     })
   }
 
@@ -335,10 +379,16 @@ export function apply(ctx: Context, config: Config) {
   /** The existing workspace over the chat dir, if any (resolveByPath is async). */
   const chatWorkspace = () => registry.resolveByPath(chatDir)
 
-  /** Answer the extension's lifecycle requests that ride in as pipe frames. */
-  async function handlePipeRequest(frame: { id: string; method: string; params?: Record<string, unknown> }): Promise<void> {
+  /**
+   * Answer the extension's lifecycle requests that ride in as pipe frames.
+   * The reply goes back to the socket that asked (a broadcast reply let a
+   * second connected pipe answer for the first).
+   */
+  async function handlePipeRequest(source: WebSocket, frame: { id: string; method: string; params?: Record<string, unknown> }): Promise<void> {
     const id = frame.id
-    const reply = (out: Record<string, unknown>) => sendToPipes({ type: 'reply', id, result: out })
+    const reply = (out: Record<string, unknown>) => {
+      if (source.readyState === source.OPEN) source.send(JSON.stringify({ type: 'reply', id, result: out }))
+    }
     try {
       const sessionId = String(frame.params?.sessionId ?? '')
       if (frame.method === 'augmentor/save') {
@@ -443,16 +493,24 @@ export function apply(ctx: Context, config: Config) {
       if (frame.type === 'request' && frame.id !== undefined && frame.method) {
         // The extension's lifecycle requests (save/unsave/state) arrive as
         // forwarded pipe frames; the plugin answers them itself.
-        void handlePipeRequest(frame)
+        void handlePipeRequest(pipe, frame)
         return
       }
       if (frame.type !== 'reply' || frame.id === undefined) return
       const waiter = pending.get(frame.id)
       if (!waiter) return // late reply after the timeout already settled the waiter
+      if (waiter.socket !== pipe) return // S6: the reply must come from the socket the request went to
       if (frame.error) waiter.settle({ ok: false, error: frame.error.message ?? 'browser error' })
       else waiter.settle({ ok: true, result: frame.result })
     })
-    const drop = () => pipes.delete(pipe)
+    const drop = () => {
+      pipes.delete(pipe)
+      // Settle the in-flight round trips bound to this socket instead of
+      // letting them hang out the full command timeout.
+      for (const [id, waiter] of [...pending]) {
+        if (waiter.socket === pipe) waiter.settle({ ok: false, error: 'browser client disconnected' })
+      }
+    }
     pipe.on('close', drop)
     pipe.on('error', drop)
   })

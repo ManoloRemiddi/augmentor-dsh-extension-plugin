@@ -8,12 +8,14 @@
 //
 // Repo home: augmentor/test/m2-e2e.mjs (uses plugin/node_modules/ws).
 // Env: E2E_PORT (default 9223), E2E_PROFILE (default /tmp/chrome-m2-profile),
-//      M2_PROMPT (default 'Reply with exactly one line: M2 OK').
-// Asserts: connect -> 'connected'; a prompt sent from the composer produces an
-// assistant reply in #log (real turn through DSH); the model picker switches
-// models without error (session.selectModel); a session.create landed (an
-// augmentor-* session in session.list); the M1 fence row is still 403; the
-// target DSH session still renders (M1 regression).
+//      M2_PROMPT (default: unique marker + one-line reply).
+// Asserts: auto-connect (send button enabled — 0.1.17 contract); a prompt
+// sent from the composer produces an assistant reply in #log (real turn
+// through DSH); the model picker switches models without error
+// (session.selectModel, dynamic unselected-row target); a session.create
+// landed (an augmentor-* session in session.list); the M1 fence row is still
+// 403; the marker session reopens and renders (M1 regression). The probe
+// session is archived at the end.
 import { spawn } from 'node:child_process'
 import fs from 'node:fs'
 import os from 'node:os'
@@ -27,9 +29,11 @@ const WebSocket = require(path.join(AUG, 'plugin/node_modules/ws'))
 
 const PORT = Number(process.env.E2E_PORT ?? 9223)
 const PROFILE = process.env.E2E_PROFILE ?? '/tmp/chrome-m2-profile'
-const TARGET = 'session-71a131cc-dc6b-4adb-b022-8a25e561985a'
-const PROMPT = process.env.M2_PROMPT ?? 'Reply with exactly one line: M2 OK'
-const MARKER = PROMPT.includes('M2 OK') ? 'M2 OK' : PROMPT.slice(0, 20)
+// Hermetic marker session (the old version pinned a live session id that
+// drifted out of the popover list). With an env prompt, the marker is its
+// first 20 chars, as before.
+const MARKER = process.env.M2_PROMPT ? process.env.M2_PROMPT.slice(0, 20) : 'M2_E2E_OK_' + Math.random().toString(36).slice(2, 10)
+const PROMPT = process.env.M2_PROMPT ?? `${MARKER} — reply with exactly one line: OK`
 const LOCAL_MODEL = { provider: 'mx-qwen', model: 'Qwen3.8-27B-UD-Q6_K_XL' } // known-good: serves this very deployment
 const fail = (m) => { console.error('M2-E2E FAIL:', m); try { chromium?.kill() } catch {} ; process.exit(1) }
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
@@ -116,19 +120,18 @@ for (let i = 0; i < 40; i++) {
   if (rs === 'complete') break
   await sleep(500)
 }
-if (!await ev('!!document.getElementById("connect")')) fail('sidepanel DOM not ready')
+if (!await ev('!!document.getElementById("title")')) fail('sidepanel DOM not ready')
 process.stderr.write('[m2] sidepanel DOM ready\n')
 
-// ---------- 1. Connect ----------
-await ev('document.getElementById("connect").click()')
-let status = null
+// ---------- 1. Auto-connect (no Connect button since 0.1.16) ----------
+// Readiness is the send button's enabled state (0.1.17).
+let ready = false
 for (let i = 0; i < 60; i++) {
   await sleep(500)
-  status = await ev('document.getElementById("status").textContent')
-  if (status === 'connected') break
-  if (String(status).startsWith('error')) fail(`panel error: ${status}`)
+  ready = await ev('!document.getElementById("send").disabled')
+  if (ready) break
 }
-if (status !== 'connected') fail(`never connected (status=${status})`)
+if (!ready) fail('never connected (send stayed disabled)')
 process.stderr.write('[m2] connected (real SW + pipe + live server)\n')
 
 // ---------- 2. Send a prompt (the agent works) ----------
@@ -148,7 +151,6 @@ async function waitReply(marker, ms = 180000) {
     const err = await sendFailText()
     if (err) lastErr = err
     if (t.includes(marker)) return t
-    if (String(status).startsWith('error')) break
   }
   return null
 }
@@ -186,14 +188,16 @@ for (let i = 0; i < 30; i++) {
 process.stderr.write(`[m2] assistant reply rendered (${(await logText()).length} chars in #log, ${await assistantCount()} assistant bubbles, settled=${settled})\n`)
 
 // ---------- 3. Model picker round-trip (session.selectModel) ----------
+// Target is dynamic: any UNSELECTED row of the current catalog (the old
+// version pinned a remote model that may no longer be in the catalog).
 const modelLabel0 = await ev('document.getElementById("model-label").textContent')
-const other = modelLabel0 === 'Qwen3.8-27B (local)' ? { provider: 'deepseek-official', model: 'deepseek-v4-flash', title: 'DeepSeek-V4-Flash' } : LOCAL_MODEL
 await ev('document.getElementById("model").click()')
 for (let i = 0; i < 20; i++) { await sleep(500); if (await ev('document.querySelectorAll(".mp-row").length')) break }
 const rows = await ev('document.querySelectorAll(".mp-row").length')
-const pickRow = `[...document.querySelectorAll(".mp-row")].find(r => r.title === ${JSON.stringify(other.provider + ' / ' + other.model)})`
-if (!(await ev(`!!(${pickRow})`))) fail('picker round-trip row not found')
-await ev(`${pickRow}.click()`)
+if (rows < 2) fail('picker has <2 rows — cannot round-trip a model switch')
+const altRow = `[...document.querySelectorAll(".mp-row")].find(r => !r.classList.contains("selected"))`
+if (!(await ev(`!!(${altRow})`))) fail('no unselected picker row found')
+await ev(`${altRow}.click()`)
 await sleep(1500)
 const pickerErr = await sendFailText()
 if (pickerErr && (pickerErr.includes('unknown model') || pickerErr.includes('switch failed'))) fail(`model switch failed: ${pickerErr}`)
@@ -229,39 +233,49 @@ const probeData = JSON.parse(fs.readFileSync(probeFile, 'utf8'))
 if (probeData.fenced?.status !== 403) fail(`fence row expected 403, got ${probeData.fenced?.status}`)
 process.stderr.write(`[m2] probe: api=${probeData.api?.status} root=${probeData.root?.status} fenced=${probeData.fenced?.status}\n`)
 
-// ---------- 6. Open the target DSH session (M1 regression: render) ----------
-const listItem = listV.items.find((s) => s.sessionId === TARGET)
-const listTitle = listItem.projections?.values?.title ?? listItem.cwd
-const rowSel2 = `[...document.querySelectorAll(".sp-row")].find(r => r.querySelector(".sp-title")?.textContent === ${JSON.stringify(listTitle)})`
-if (!(await ev(`!!(${rowSel2})`))) fail('target row not found in real Chrome list')
-await ev(`${rowSel2}.click()`)
-// expected newest user message of the target session
-let expectedUserText = null
-for (const h of (await rpc('session.history', { sessionId: TARGET, maxMessages: 50 })).events ?? []) {
-  if (h.event?.type === 'user/message') {
-    const parts = h.event.data?.message?.content ?? h.event.data?.content
-    const text = (Array.isArray(parts) ? parts.filter((p) => p?.type === 'text').map((p) => p.text).join('') : String(parts ?? '')).trim()
-    if (text) expectedUserText = text.slice(0, 80)
-  }
+// ---------- 6. Reopen the marker session (M1 regression: render) ----------
+// The section-2 probe session (marker in its derived title) is the target —
+// no pinned external session id.
+const rowSel3 = `[...document.querySelectorAll(".sp-row")].find(r => (r.querySelector(".sp-title")?.textContent ?? "").includes(${JSON.stringify(MARKER)}))`
+let rowFound3 = false
+for (let i = 0; i < 20; i++) {
+  await sleep(500)
+  rowFound3 = await ev(`!!(${rowSel3})`)
+  if (rowFound3) break
 }
+if (!rowFound3) fail('M1 regression: marker session row not found')
+await ev(`${rowSel3}.click()`)
 let logText2 = ''
 for (let i = 0; i < 60; i++) {
   await sleep(500)
   logText2 = await logText()
-  if (expectedUserText && logText2.includes(expectedUserText)) break
+  if (logText2.includes(MARKER)) break
 }
-const renderedUser = logText2.includes(expectedUserText)
-if (!renderedUser) fail('M1 regression: target session not rendered')
-process.stderr.write(`[m2] M1 regression: target session rendered (${logText2.length} chars)\n`)
+const renderedUser = logText2.includes(MARKER)
+if (!renderedUser) fail('M1 regression: marker session not rendered')
+process.stderr.write(`[m2] M1 regression: marker session rendered (${logText2.length} chars)\n`)
+
+// ---------- 7. Cleanup: archive the probe session ----------
+let SID = null
+for (const s of (await rpc('session.list', {})).items.filter((x) => String(x.sessionId).startsWith('augmentor-'))) {
+  const hist = (await rpc('session.history', { sessionId: s.sessionId, maxMessages: 10 })).events ?? []
+  if (JSON.stringify(hist).includes(MARKER)) { SID = s.sessionId; break }
+}
+if (!SID) fail('probe session not found for cleanup')
+await rpc('workspace.archiveSession', { sessionId: SID })
+const archived = (await rpc('workspace.list', {})).archivedSessionIds ?? []
+if (!archived.includes(SID)) fail('probe session not archived', archived)
+process.stderr.write(`[m2] cleanup: ${SID} archived\n`)
 
 // ---------- evidence ----------
 console.log(JSON.stringify({
-  status: await ev('document.getElementById("status").textContent'),
+  status: (await ev('!document.getElementById("send").disabled')) ? 'ready' : 'not-ready',
   prompt: { via: promptVia, marker: MARKER, replyChars: reply.length, settled, assistantBubbles: await assistantCount() },
   picker: { rows, from: modelLabel0, to: modelLabel1 },
   createdSessions: augm.map((s) => s.sessionId),
   probe: { api: probeData.api?.status, root: probeData.root?.status, fenced: probeData.fenced?.status },
   m1Regression: { title: await ev('document.getElementById("title").textContent'), logChars: logText2.length, renderedUserText: renderedUser },
+  cleanup: { session: SID, archived: true },
 }, null, 1))
 console.error('M2-E2E: OK — the agent works in real Chrome (prompt -> reply), picker switches, M1 intact')
 bws.close(); pws.close()

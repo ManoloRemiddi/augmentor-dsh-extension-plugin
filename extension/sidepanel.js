@@ -1,10 +1,9 @@
 /**
  * Augmentor (powered by DSH) — side panel UI.
  *
- * ResonantOS-style sidebar: click the toolbar icon to open this panel. Same
- * protocol as the popup (the SW owns the native port); renders the session
- * event stream with GUI-parity styling (markdown, Think blocks, compact tool
- * rows, stats line).
+ * ResonantOS-style sidebar: click the toolbar icon to open this panel (the SW
+ * owns the native port); renders the session event stream with GUI-parity
+ * styling (markdown, Think blocks, compact tool rows, stats line).
  */
 
 import { createChatUI } from './chat-render.js'
@@ -705,14 +704,19 @@ $newchat.addEventListener('click', async (e) => {
 // "permission", path defaultPreset) — the same knob the DSH GUI's own
 // settings row writes — and per DSH's settings-store contract it applies to
 // subsequently created sessions, not the one already running.
-// Default = Automatic (full access): if the setting has no defaultPreset at
-// all, we set it once; an explicit user choice is never overridden.
+// Scope (audit S2): the preset gates DSH's file/execution approvals — it does
+// not bind the agent model, and it does not gate the browser_* tools: the
+// browser is the user's own surface, driven from this panel.
+// First-run default (audit S2): Manual (workspace write) — the safer preset
+// is what a fresh install inherits. Written only when the setting has no
+// defaultPreset at all, so existing installs keep their saved choice; full
+// access stays one long-press away (behind its risk confirmation).
 const ACCESS_PRESETS = [
   { value: 'read-only', label: 'Read only', desc: 'Nothing is written; attempts ask for approval.' },
   { value: 'workspace-write', label: 'Manual (workspace write)', desc: 'Writes inside the workspace; wider actions ask you first.' },
   { value: 'danger-full-access', label: 'Automatic (full access)', desc: 'Everything allowed automatically — no approval prompts.' },
 ]
-const DEFAULT_ACCESS = 'danger-full-access'
+const DEFAULT_ACCESS = 'workspace-write'
 let accessCurrent = null
 let accessRevision = null
 let accessMenu = null
@@ -734,7 +738,8 @@ async function loadAccess() {
   accessCurrent = view.value?.defaultPreset ?? null
   accessRevision = view.revision ?? null
   if (accessCurrent === null) {
-    // No preset chosen yet → default to full access (automatic), once.
+    // No preset chosen yet (fresh install) → default to Manual
+    // (workspace write), once. An explicit user choice is never overridden.
     const set = await send('settings/mutate', {
       ns: 'permission',
       ops: [{ op: 'set', path: ['defaultPreset'], value: DEFAULT_ACCESS }],

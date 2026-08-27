@@ -1,10 +1,10 @@
 /**
  * Augmentor (powered by DSH) — MV3 service worker.
  *
- * Owns the native messaging port to the Augmentor bridge (an open port keeps this
- * SW alive, so the popup may close while the agent works). Relays prompts and
- * session events between the popup and the runtime, and executes browser
- * actions the runtime requests via the bridge.
+ * Owns the native messaging port to the Augmentor pipe (an open port keeps this
+ * SW alive, so the side panel may close while the agent works). Relays prompts
+ * and session events between the side panel and the runtime, and executes
+ * browser actions the runtime requests via the pipe.
  */
 
 // Shared color math (theme-tokens.js): the veil's accent palette and the

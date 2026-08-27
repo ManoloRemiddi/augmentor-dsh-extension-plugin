@@ -18,15 +18,15 @@
 //      two read-back divs (#status, #echo) — all state is innerText-readable
 //      so browser_snapshot can verify it.
 //   4. The sidepanel drives a real prompt turn on the app's default model
-//      (deepseek-official/deepseek-v4-flash, per the symlinked settings.yaml)
-//      that must call, in order:
+//      (whatever the symlinked settings.yaml selects — today the local Qwen
+//      server) that must call, in order:
 //        browser_tabs_list -> browser_navigate -> browser_click ->
 //        browser_type -> browser_snapshot
 //      (the full M2 tool set — a model that cannot SEE the tools cannot call
 //      them, so passing tool calls prove the fresh-boot registry is visible).
 //
 // Asserts (all must hold):
-//   - panel connects ('connected')
+//   - panel reaches send-ready (send button enabled — 0.1.17 contract)
 //   - the turn calls ALL FIVE tools, in that order (session.history of the
 //     created augmentor-* session on the isolated server)
 //   - the test page DOM reflects the actions: #status 'CLICKED', #box value
@@ -190,11 +190,42 @@ function cleanup() {
 let CLEAN_PASS = false
 process.on('exit', cleanup)
 
+// ---------- LLM credentials for the isolated instance ----------
+// The isolated server symlinks settings.yaml, but the live deployment
+// resolves its model keys from the shell env that launched `dsh web` (the
+// credentials file only holds the web-Models-page keys). Without the same
+// keys the default-model turn dies with MISSING_CREDENTIAL before any tool
+// runs. Harvest key-shaped vars from this env and from the live dsh
+// process's environ (same user) — names are logged, values never are.
+function harvestCredEnv() {
+  const isKey = (k) => /(^DASH_[A-Z0-9_]*KEY$|_API_KEY$)/.test(k)
+  const out = {}
+  for (const [k, v] of Object.entries(process.env)) if (v && isKey(k)) out[k] = v
+  try {
+    for (const pid of fs.readdirSync('/proc').filter((x) => /^\d+$/.test(x))) {
+      if (Number(pid) === process.pid) continue
+      try {
+        if (!/dsh( |\0)(--profile web|web)/.test(fs.readFileSync(`/proc/${pid}/cmdline`, 'utf8'))) continue
+        for (const line of fs.readFileSync(`/proc/${pid}/environ`, 'utf8').split('\0')) {
+          const eq = line.indexOf('=')
+          if (eq < 0) continue
+          const k = line.slice(0, eq), v = line.slice(eq + 1)
+          if (v && isKey(k) && out[k] === undefined) out[k] = v
+        }
+        break // first live dsh web is the deployment's source of truth
+      } catch { /* not readable: skip */ }
+    }
+  } catch { /* no /proc: own env only */ }
+  return out
+}
+const CRED_ENV = harvestCredEnv()
+process.stderr.write(`[tools] LLM credential env: ${Object.keys(CRED_ENV).join(', ') || '(none — the default-model turn will fail with MISSING_CREDENTIAL)'}\n`)
+
 // ---------- main ----------
 async function main() {
   DSH_PORT = await freePort()
   dsh = spawn('dsh', ['--profile', 'web', '--patch', OVERLAY, '--port', String(DSH_PORT), '--no-open'], {
-    env: { ...process.env, DSH_HOME: ISO_HOME },
+    env: { ...process.env, DSH_HOME: ISO_HOME, ...CRED_ENV },
     stdio: ['ignore', dshLog, dshLog],
   })
   PIDS.push(dsh.pid)
@@ -281,19 +312,20 @@ async function main() {
     if (rs === 'complete') break
     await sleep(500)
   }
-  if (!await ev('!!document.getElementById("connect")')) fail('sidepanel DOM not ready')
+  if (!await ev('!!document.getElementById("title")')) fail('sidepanel DOM not ready')
   process.stderr.write('[tools] sidepanel DOM ready\n')
 
-  // ---------- connect (real SW + pipe -> isolated server, token-gated) ----------
-  await ev('document.getElementById("connect").click()')
-  let status = null
+  // ---------- auto-connect (real SW + pipe -> isolated server, token-gated) ----------
+  // There is no Connect button since 0.1.16: the SW connects on boot (and
+  // retries on backoff), so readiness must arrive unaided. 0.1.17: the header
+  // status text is gone — readiness is the send button's enabled state.
+  let panelReady = false
   for (let i = 0; i < 60; i++) {
     await sleep(500)
-    status = await ev('document.getElementById("status").textContent')
-    if (status === 'connected') break
-    if (String(status).startsWith('error')) fail(`panel error: ${status}`)
+    panelReady = await ev('!document.getElementById("send").disabled').catch(() => false)
+    if (panelReady) break
   }
-  if (status !== 'connected') fail(`never connected (status=${status})`)
+  if (!panelReady) fail('never connected (send stayed disabled)')
   process.stderr.write('[tools] connected (real SW + pipe + isolated token-gated server)\n')
 
   // ---------- the prompt turn: all five browser tools, in order ----------
@@ -350,10 +382,9 @@ TABS=<count> STATUS=<text of the #status element> ECHO=<text of the #echo elemen
   })()
 
   // ---------- wait for the assistant reply (transient-network retry) ----------
-  // api.deepseek.com sits behind CloudFront and is flaky from this network
-  // (measured 2-in-3 requests timing out for minutes at a time); a turn that
-  // dies on a network error before any tool ran is safe to resend — the page
-  // actions are idempotent and the session already exists.
+  // A turn that dies on a transient network/model error before any tool ran
+  // is safe to resend — the page actions are idempotent and the session
+  // already exists.
   const logText = () => ev('document.getElementById("log").textContent') ?? ''
   // The final answer must carry the reported tab count — the model's reasoning
   // quotes the instructed format as 'TABS=<count> …' (angle brackets, no digit),
@@ -373,6 +404,7 @@ TABS=<count> STATUS=<text of the #status element> ECHO=<text of the #echo elemen
     const errs = await errList()
     const err = errs.join(' | ')
     if (err) lastErr = err
+    if (err.includes('MISSING_CREDENTIAL')) break // setup issue, not transient — see the credential-env log line
     if (REPLY_LINE(t)) { reply = t; break }
     if (errs.length > handledErrCount && TRANSIENT.test(err) && attempts < MAX_PROMPT_ATTEMPTS) {
       handledErrCount = errs.length
@@ -381,7 +413,6 @@ TABS=<count> STATUS=<text of the #status element> ECHO=<text of the #echo elemen
       await ev(`(function(){ const i = document.getElementById('input'); i.value = ${JSON.stringify(PROMPT)}; document.getElementById('send').click(); return true })()`)
       continue
     }
-    if (String(status).startsWith('error')) break
   }
   if (!reply) fail(`no assistant reply reporting the page state (error strip: ${lastErr || 'none'})`)
   process.stderr.write(`[tools] reply rendered: ${(await logText()).length} chars in #log\n`)

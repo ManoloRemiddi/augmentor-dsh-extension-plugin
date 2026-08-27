@@ -41,7 +41,7 @@
  * assistant/chunk stripped and oldest events dropped until the frame fits
  * under the 1 MiB native-messaging wire limit. See the function comment.
  */
-import { readFileSync, writeFileSync } from 'node:fs'
+import { readFileSync, writeFileSync, openSync, writeSync, closeSync } from 'node:fs'
 import { readFile, mkdir, chmod } from 'node:fs/promises'
 import path from 'node:path'
 import os from 'node:os'
@@ -71,23 +71,42 @@ const PLUGIN_WS_PATH = '/api/augmentor/ws'
 // resolution as the plugin: explicit env > $DSH_HOME/augmentor-ws-token
 // (0600, created by whichever side boots first) > generate. Both sides of
 // the channel converge on the same secret.
+const sleepSync = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms)
 function resolveToken() {
   if (process.env.DSH_AUGMENTOR_WS_TOKEN) return { token: process.env.DSH_AUGMENTOR_WS_TOKEN, source: 'env' }
   const home = process.env.DSH_HOME ?? path.join(os.homedir(), '.dsh')
   const file = path.join(home, 'augmentor-ws-token')
-  try {
-    const existing = readFileSync(file, 'utf8').trim()
-    if (existing) return { token: existing, source: 'file' }
-  } catch {
-    /* first boot: generate */
+  const readExisting = () => {
+    try {
+      const existing = readFileSync(file, 'utf8').trim()
+      if (existing) return existing
+    } catch { /* missing */ }
+    return null
   }
+  const existing = readExisting()
+  if (existing) return { token: existing, source: 'file' }
+  // S15 (audit): first boot. The old read→write was racy — two first boots
+  // (plugin + pipe) could each generate a DIFFERENT token and last-write-wins
+  // split the channel silently. O_EXCL makes creation atomic: exactly one
+  // side wins; the loser re-reads the winner (retries while it mid-writes).
   const token = randomBytes(16).toString('hex')
   try {
-    writeFileSync(file, token + '\n', { mode: 0o600 })
-  } catch {
-    /* unresolvable home: the plugin's copy (if any) still gates; we'll fail the upgrade */
+    const fd = openSync(file, 'wx', 0o600)
+    try { writeSync(fd, token + '\n') } finally { closeSync(fd) }
+    return { token, source: 'generated' }
+  } catch (e) {
+    if (e.code !== 'EEXIST') {
+      /* unresolvable home: the plugin's copy (if any) still gates; we'll fail the upgrade */
+      return { token, source: 'generated' }
+    }
+    for (let i = 0; i < 20; i++) {
+      const winner = readExisting()
+      if (winner) return { token: winner, source: 'file' }
+      sleepSync(5)
+    }
+    log('token race: concurrent create, re-read came up empty — falling back to the local token (channel may reject it)')
+    return { token, source: 'generated' }
   }
-  return { token, source: 'generated' }
 }
 
 // ---------------------------------------------------------------- .env
@@ -102,9 +121,19 @@ function resolveToken() {
     /* no .env: process env only */
   }
   for (const line of envText.split('\n')) {
-    const m = /^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)\s*$/.exec(line)
+    const m = /^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$/.exec(line)
     if (!m || line.trim().startsWith('#')) continue
-    if (process.env[m[1]] === undefined) process.env[m[1]] = m[2]
+    // S14 (audit): dotenv semantics — the old capture kept ' # …' inline
+    // comments inside the value (and quote characters). Quoted values keep
+    // their interior verbatim; unquoted values strip from the first ' #'.
+    let val = m[2].trim()
+    if (val.length >= 2 && ((val[0] === '"' && val.endsWith('"')) || (val[0] === "'" && val.endsWith("'")))) {
+      val = val.slice(1, -1)
+    } else {
+      const hash = val.indexOf(' #')
+      if (hash !== -1) val = val.slice(0, hash).trim()
+    }
+    if (process.env[m[1]] === undefined) process.env[m[1]] = val
   }
 }
 
