@@ -1557,5 +1557,19 @@ polished README with exact install command, DSH Discord + GitHub
 Discussions posts with a "why this exists" narrative, realistic YouTube
 walkthrough, directory listings.
 
+Site 22ea269 (nav social icons): user liked the footer icons and asked for
+the same three in the top menu. `.nav-social` div inserted in `.nav-row`
+between `.nav-links` (flex:1, right-aligned) and the CTA on BOTH pages —
+compact 17px icons (same simple-icons paths, currentColor), dim by
+default, brand-colour hover (no tile/lift in the nav — the bar is already
+glass; colour-only keeps it quiet). Mobile ≤860px: `.nav-social` hidden
+alongside `.nav-links` (wordmark + CTA only — the row is already full;
+footer icons remain the mobile entry point). CSS v12, bumped in both
+pages. Verified: playwright 1280px — 3 icons visible (17px), group ends
+16px left of the CTA, 0 horizontal overflow, 0 console errors, ASCII
+pixel-render shows the three distinct glyphs + CTA block; 390px —
+display:none, no overflow, CTA intact; docs page same 3 hrefs, no
+overflow; live 200, v12 byte-exact (34811 B), footer-social intact.
+
 Note: `augmentor/README.md` (product repo) is badly stale (M0 sidecar, local
 DSH clone, `session/interrupt` patches) — not part of this pass.
