@@ -1460,5 +1460,12 @@ xlink namespace updated accordingly. Verified live: HTML 200, old vector
 symbol gone, assets/logo-opera.png 200 (15945 B byte-exact), card screenshot
 pixel-verified (221 red px at #F6192A after compositing).
 
+Site eee6d4c (docs trim): user asked to drop the retired "M0 sidecar" row
+from the "The pieces" table in docs.html. Confirmed nothing on the site
+depends on it — the only other mention is the homepage positioning line
+"Not a sidecar", which the row would have mildly contradicted; the current
+design rationale already lives in the "WHY IT'S THIS SHAPE" bullets. Table
+now: 3 shipped pieces. Live: 200, 0 M0 refs, 3 rows.
+
 Note: `augmentor/README.md` (product repo) is badly stale (M0 sidecar, local
 DSH clone, `session/interrupt` patches) — not part of this pass.
