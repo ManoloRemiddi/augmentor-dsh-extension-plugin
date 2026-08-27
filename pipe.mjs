@@ -358,13 +358,12 @@ async function openPluginWs() {
   }
   // D5 (audit): the wsPath comes from the handshake, not the constant.
   const wsPath = info?.wsPath || PLUGIN_WS_PATH
-  // S7 (audit): the token rides a WS handshake header. The query param is a
-  // TEMPORARY legacy shim: the DSH app process may still hold the old plugin
-  // (query-only reader) until its ESM cache is busted, so we send both for
-  // now. Once the plugin has been reloaded, the shim may be dropped — a
-  // query token otherwise lands in any request log the DSH app keeps.
-  const tokenQ = WS_TOKEN.token ? `?token=${encodeURIComponent(WS_TOKEN.token)}` : ''
-  const url = `${DSH_BASE.replace(/^http/, 'ws')}${wsPath}${tokenQ}`
+  // S7 (audit): the token rides ONLY the WS handshake header. The query
+  // param was a temporary legacy shim for pre-header plugins (a query token
+  // lands in any request log the DSH app keeps); it is now dropped — the
+  // live app runs the plugin that prefers the header, so a header-only
+  // handshake is the full contract.
+  const url = `${DSH_BASE.replace(/^http/, 'ws')}${wsPath}`
   const ws = new WebSocket(url, { headers: WS_TOKEN.token ? { 'x-augmentor-token': WS_TOKEN.token } : {} })
   pluginWs = ws
   ws.on('open', () => log('plugin ws connected', wsPath))

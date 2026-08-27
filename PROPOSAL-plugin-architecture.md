@@ -1706,5 +1706,77 @@ Code-audit Tier 2 (M0 retirement, S2/S6/S14/S15, D1/D2, e2e rework,
   cold boot: all five browser_* tools in order, veil seen, credential-env
   harvest active).
 
+Code-audit Tier 3 (structure + publish prep, 2026-08-27): the third and
+final tier of the same audit — the monolith split, the canonical protocol
+module, the popover factory, and everything the plugin needs to be
+publishable. Verified against the live deployment after a real hot-reload.
+- F1: sw.js (1,183 lines) is now a module service worker
+  (`manifest "background": {"service_worker": "sw.js", "type": "module"}`,
+  bump 0.1.25 → 0.1.26) split into a DAG: state.mjs → wire.mjs ←
+  worktab.mjs ← overlay.mjs (→ theme-tokens.js) ← actions.mjs; port.mjs →
+  {state, wire, overlay, actions}; panel-api.mjs → {state, port, overlay};
+  sw.js → {port, panel-api}. Behavior-identical: the full battery plus
+  sw-e2e boots the new module graph in a vm.SourceTextModule realm and
+  the real-Chrome suites run it natively (module SW is first-class in
+  Chrome 151).
+- F2: the browser-tool DOM side lands in dom-actions.js behind the
+  __dshAugDom global (overlay injects it); the legacy 'html' wire action
+  is dropped — the five browser_* tools cover it.
+- F5: repo-root wire.mjs is the canonical protocol module (encode/decode,
+  genId, Pending); extension/wire.mjs is a byte-identical copy, asserted
+  by sw-e2e at boot (Buffer.equals) so the two can never drift. The
+  battery also caught a residual bug this exposed: pipe.mjs's
+  augmentor/* plugin-waiters still spoke the Map API (set/delete) to the
+  Pending class — every save request threw a TypeError into the
+  extension (save badge never flipped) and left a stale 30 s timer that
+  would have crashed the pipe. Fixed with Pending.add/settle; m3-e2e
+  green.
+- F6: theme-tokens.js is the single source of palette + tokens; veil.js,
+  the overlay and lab/veil-preview.html all read from it.
+- F10: the header's three popovers (model picker, sessions, hue) are
+  built on one popover() factory in sidepanel.js — open/close/position/
+  toggle, outside-mousedown + Escape close, optional .open class for the
+  picker's button state.
+- D3: publish metadata — root LICENSE (MIT), plugin/LICENSE,
+  plugin/README.md; plugin/dist/ is COMMITTED (not git-ignored) so the
+  live app can hot-reload the plugin without a build step; dsh plugin add
+  therefore installs a runnable artifact.
+- D4: plugin pnpm ≥10 esbuild approval — pnpm-workspace.yaml
+  allowBuilds + lockfile refresh (install no longer fails the build
+  prompt).
+- D5: install-native-host.sh now refuses to double-mount: if the live
+  patch file holds exactly one ?src= extension mount and ≥1 bare-name
+  mount, the M4 bare-name block is dropped (with .bak + stderr warning),
+  so a published install can never shadow the live one; DSH_PATCH env
+  override for staging. README gains a Security posture section (403
+  fence rationale, header-only token channel, 0600 token file, config
+  wins over file).
+- e2e (fix-not-delete, 3 oracle/assert adaptations + 1 production bug):
+  the marker-session row oracles in panel/chrome/m2 e2e matched rows by
+  RENDERED TITLE, which races a real DSH behavior — the app rewrites
+  session titles asynchronously after the turn (the marker title is
+  replaced by the assistant's first line within seconds). Rows now carry
+  data-session-id and every suite pins the new session via a
+  session.list id diff, then matches the row by id. panel-e2e's final
+  assert now checks rendered user + assistant prose instead of a 200-char
+  log floor that depended on how verbose the model was (the marker prompt
+  legitimately gets a 2-char reply). Flow preserved everywhere; the only
+  deletion is the bad oracles.
+- Hot-reload + shim drop (order-locked): T3 committed (eb431dc) and
+  pushed; the live ~/.dsh/cordis.patch.yml ?src= bumped 69cd1da →
+  eb431dc WITHOUT restarting the app (handshake then reports version
+  0.1.26 — the aligned plugin version; before the bump it reported
+  0.1.0); m3 / chrome / m2 e2e all re-ran green against the live
+  deployment. With the header-reading plugin confirmed live, the
+  pipe's ?token= query shim is DROPPED: the WS handshake now carries the
+  token ONLY in the x-augmentor-token header (a query token lands in
+  request logs). Verified: a raw header-only WS handshake is welcomed by
+  the live app and answers augmentor/state; sw-e2e green on the
+  header-only pipe.
+Verified: node --check on every touched file; the full battery green —
+sw / panel / m3 / chrome / m2 / tools e2e + plugin/tests/boot/run.sh
+(fresh-copy, token-gated, ALL PASS); live re-run of m3 / chrome / m2
+after the hot-reload; header-only auth probe against the live app.
+
 Note: `augmentor/README.md` (product repo) is badly stale (M0 sidecar, local
 DSH clone, `session/interrupt` patches) — not part of this pass.
