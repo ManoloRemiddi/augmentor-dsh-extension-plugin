@@ -29,16 +29,26 @@ exec "$NODE_BIN" "$AUGMENTOR_DIR/pipe.mjs"
 EOF
 chmod +x "$HOST_SH"
 
-# Fresh clones have no node_modules: the plugin's dist bundle imports
-# ws / @deepseek-ai/dsh-tools / @deepseek-ai/schemastery at runtime, so a
-# local-dir mount (dsh plugin add <repo>/plugin) needs them installed.
-# The installer already runs inside the clone — make the local path
-# deterministic here instead of as a separate user step. The npm path
-# (dsh plugin add dsh-augmentor) installs its own deps and skips this.
-if [ ! -e "$AUGMENTOR_DIR/plugin/node_modules" ] && command -v pnpm >/dev/null 2>&1; then
-  echo "installing plugin dependencies (first run in a fresh clone)..."
-  (cd "$AUGMENTOR_DIR/plugin" && pnpm install --ignore-scripts) || \
-    echo "warn: pnpm install in plugin/ failed; the local-dir plugin mount may not load (the npm path is unaffected)" >&2
+# Fresh clones have no node_modules anywhere, and both runtime entry
+# points need packages resolved:
+#   - pipe.mjs (root) imports ws from <repo>/node_modules
+#   - the plugin's dist bundle imports ws / @deepseek-ai/dsh-tools /
+#     @deepseek-ai/schemastery (local-dir mount: <repo>/plugin/node_modules)
+# The npm path (dsh plugin add dsh-augmentor) installs its own deps and
+# only needs the root install for the pipe. The installer runs inside the
+# clone, so it makes the first pipe boot deterministic here instead of
+# asking the user for an extra install step.
+if command -v pnpm >/dev/null 2>&1; then
+  if [ ! -e "$AUGMENTOR_DIR/node_modules" ]; then
+    echo "installing pipe dependencies (first run in a fresh clone)..."
+    (cd "$AUGMENTOR_DIR" && pnpm install --ignore-scripts) || \
+      echo "warn: pnpm install in repo root failed; the pipe will not start (Cannot find package 'ws')" >&2
+  fi
+  if [ ! -e "$AUGMENTOR_DIR/plugin/node_modules" ]; then
+    echo "installing plugin dependencies (first run in a fresh clone)..."
+    (cd "$AUGMENTOR_DIR/plugin" && pnpm install --ignore-scripts) || \
+      echo "warn: pnpm install in plugin/ failed; the local-dir plugin mount may not load (the npm path is unaffected)" >&2
+  fi
 fi
 
 # Per-machine action-channel secret (drives the user's browser). The plugin
