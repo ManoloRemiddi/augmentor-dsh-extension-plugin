@@ -32,14 +32,15 @@ fence — by design).
 | `plugin/` | the `dsh-augmentor` DSH plugin (npm package + git bundle): `/api/augmentor` handshake, pipe WS channel, `browser_*` tools, chat lifecycle |
 | `wire.mjs` | the shared wire primitives (frame codec + pending table) used by all three runtimes — one implementation, three consumers |
 | `install-native-host.sh` | installs the Chromium native-messaging-host manifest + the per-machine channel token |
-| `test/` | e2e suites (m3, sw, panel, chrome, m2, tools) + `plugin/tests/boot/` |
+| `test/` | e2e suites (m3, sw, panel, chrome, m2, tools) + `install-proof.mjs` (deterministic fresh-user install proof) + `plugin/tests/boot/` |
 | `PROPOSAL-plugin-architecture.md` | the architecture record: milestones M1–M4, audit findings S/D/F, decisions |
 
 ## Install
 
-Prereqs: Node.js ≥ 22.18, a running `dsh web` instance, a Chromium-based
-browser (Chrome/Chromium/Edge; Firefox & Safari are "coming soon" — the
-native-messaging + content-injection stack is Chromium-specific today).
+Prereqs: Node.js (v22.19+ or v24+), a running `dsh web` instance, a
+Chromium-based browser (Chrome/Chromium/Edge; Firefox & Safari are "coming
+soon" — the native-messaging + content-injection stack is Chromium-specific
+today).
 
 1. **Clone**
 
@@ -56,8 +57,9 @@ native-messaging + content-injection stack is Chromium-specific today).
    ./install-native-host.sh <extension-id>
    ```
 
-   Writes the NMH manifest (points at `pipe.mjs`) and creates the per-machine
-   action-channel token (`~/.dsh/augmentor-ws-token`, 0600).
+   Writes the NMH manifest (points at `pipe.mjs`), creates the per-machine
+   action-channel token (`~/.dsh/augmentor-ws-token`, 0600) if missing, and
+   installs the repo's Node dependencies (root + `plugin/`) if missing.
 
 4. **Mount the plugin into your DSH profile**
 
@@ -65,7 +67,7 @@ native-messaging + content-injection stack is Chromium-specific today).
    dsh plugin --profile web add <repo-path>/plugin
    ```
 
-   (or `dsh plugin --profile web add dsh-augmentor` from npm once published.)
+   (or from npm: `dsh plugin --profile web add dsh-augmentor`.)
    Restart the `dsh web` session so the profile composes the plugin layer.
 
 5. **Reload the extension** (it reconnects the native port; a brief SW
@@ -108,6 +110,13 @@ sh plugin/tests/boot/run.sh
 The suites are hermetic: each creates its own marker session (and archives it
 on cleanup), never touches user sessions, and the live-browser suites (m3,
 chrome, m2) run against the real local DSH app + a real Chrome profile.
+
+# deterministic install proof — the documented journey, end to end, on a fresh
+# DSH home + fresh Chromium profile (never touches your real ~/.dsh):
+node test/install-proof.mjs                 # clone → boot → plugin → ext → NMH → pipes:1
+PROOF_LLM=1 node test/install-proof.mjs     # + a real agent drives the headless browser
+PROOF_SOURCE=npm PROOF_LLM=1 node test/install-proof.mjs   # npm plugin path (once published)
+# knobs: PROOF_REPO, CHROME_BIN, PROOF_PORT, PROOF_KEEP=1 — see the script header.
 
 ## License
 
