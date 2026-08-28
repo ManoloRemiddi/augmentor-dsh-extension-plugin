@@ -75,6 +75,14 @@ today).
    (or from npm: `dsh plugin --profile web add dsh-augmentor`.)
    Restart the `dsh web` session so the profile composes the plugin layer.
 
+   > **pnpm users — first 24h after a release:** `dsh plugin` forwards to
+   > pnpm, and pnpm ≥ 11 enforces a ~24h *minimum release age* (supply-chain
+   > protection) — silently installing the newest version that passes. Right
+   > after a publish, the bare name can therefore resolve to the **previous**
+   > release. `npm view dsh-augmentor version` shows the newest; to get it
+   > immediately, pin it: `dsh plugin --profile web add dsh-augmentor@<version>`.
+   > The bare name self-heals once the release is a day old.
+
 5. **Reload the extension** (it reconnects the native port; a brief SW
    reconnect blip is normal). Open a side panel session, type a prompt, and
    the agent can now see and drive the active work tab.

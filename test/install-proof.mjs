@@ -179,11 +179,23 @@ ok('dsh web boot (fresh DSH_HOME, profile seeded from npm)', `GET / 200`)
 
 // ============================================================ 5. install plugin
 const tAdd = Date.now()
-const addArgs = SOURCE === 'npm' ? ['dsh-augmentor'] : [path.join(REPO_DIR, 'plugin')]
+// npm path spec: bare name by default; PROOF_NPM_SPEC can pin a version
+// (pnpm >= 11 enforces a 24h minimum-release-age by default and SILENTLY
+// falls back to the newest version that passes — right after a publish the
+// documented bare spec can land on the PREVIOUS release; the check below
+// catches that in seconds instead of at plugin load 200s later)
+const npmSpec = process.env.PROOF_NPM_SPEC || 'dsh-augmentor'
+const addArgs = SOURCE === 'npm' ? [npmSpec] : [path.join(REPO_DIR, 'plugin')]
 execFileSync(DSH_BIN, ['plugin', '--profile', 'web', 'add', ...addArgs], { env: appEnv, stdio: 'pipe' })
 const addedIn = ((Date.now() - tAdd) / 1000).toFixed(1) + 's'
 const pluginPkg = JSON.parse(readFileSync(path.join(REPO_DIR, 'plugin', 'package.json'), 'utf8'))
-ok(`dsh plugin --profile web add ${SOURCE === 'npm' ? 'dsh-augmentor (registry)' : '<clone>/plugin (local dir)'}`, addedIn)
+ok(`dsh plugin --profile web add ${SOURCE === 'npm' ? `${npmSpec} (registry)` : '<clone>/plugin (local dir)'}`, addedIn)
+if (SOURCE === 'npm' && !process.env.PROOF_NPM_SPEC) {
+  const installed = JSON.parse(readFileSync(path.join(ISOLATED_HOME, 'profiles', 'web', 'node_modules', 'dsh-augmentor', 'package.json'), 'utf8')).version
+  const published = execFileSync('npm', ['view', 'dsh-augmentor', 'version'], { encoding: 'utf8' }).trim()
+  if (installed !== published)
+    fail('npm spec resolved to previous release', `profile has dsh-augmentor@${installed} but the registry latest is ${published} — pnpm's 24h minimum-release-age gate fell back. Re-run with PROOF_NPM_SPEC='dsh-augmentor@${published}' (pin), or wait for the release to age past 24h.`)
+}
 
 // ============================================================ 6. live-mount probe
 let liveMount = false
