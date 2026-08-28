@@ -214,7 +214,9 @@ const chromeFlags = [
   '--disable-extensions-except=' + path.join(REPO_DIR, 'extension'),
   '--no-first-run', '--no-default-browser-check',
   '--disable-dev-shm-usage', // CI runners have a 64MB /dev/shm; Chrome crashes without this
-  ...(process.getuid?.() === 0 ? ['--no-sandbox'] : []),
+  '--no-sandbox', // disposable proof browser: the sandbox proves nothing about the
+  // documented flow, and CI runners' playwright build has no setuid sandbox
+  // helper — without this flag Chrome FATALs at startup on ubuntu-latest
   'about:blank',
 ]
 const chromeLog = path.join(WORK, 'chrome.log')
@@ -238,8 +240,16 @@ for (let i = 0; i < 60 && !extId; i++) {
   await sleep(1000)
 }
 if (!extId) {
-  const tail = existsSync(chromeLog) ? readFileSync(chromeLog, 'utf8').split('\n').slice(-15).join('\n') : '(no chrome log)'
-  fail('chromium + unpacked extension', `no extension id in fresh profile — chrome log tail:\n${tail}`)
+  // A crashed Chrome writes a FATAL dump: the reason line sits near the top
+  // of the dump, not at its tail — surface FATAL/Check-failed lines + tail.
+  const diag = (() => {
+    if (!existsSync(chromeLog)) return '(no chrome log)'
+    const lines = readFileSync(chromeLog, 'utf8').split('\n')
+    const fatal = lines.map((l, i) => (/FATAL|Check failed|# Fatal|Running as root without|--no-sandbox|sandbox/.test(l) ? i : -1)).filter((i) => i >= 0)
+    const ctx = fatal.length ? lines.slice(Math.max(0, fatal[0] - 2), fatal[0] + 10).join('\n') + '\n…\n' : ''
+    return ctx + lines.slice(-10).join('\n')
+  })()
+  fail('chromium + unpacked extension', `no extension id in fresh profile — chrome log:\n${diag}`)
 }
 ok('chromium + unpacked extension (real id from fresh profile)', extId)
 
