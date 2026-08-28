@@ -410,12 +410,20 @@ async function openPluginWs() {
 // F8 (audit, 2026-08-28 field finding): the DSH app hot-swaps the plugin
 // module IN-PLACE (a ?src= query bump reloads it inside the same process).
 // The old plugin's WS server is abandoned with its client sockets still
-// ESTABLISHED — the kernel keeps the TCP connection open and silent, so this
-// pipe's 'close' event never fires and the reconnect loop below never runs:
-// the zombie-pipe mode (process alive, ext leg alive, plugin leg dead,
-// "pipes: 0"). A liveness ping catches exactly that: a healthy server
-// auto-pongs, an orphaned socket never does. A real process restart still
-// surfaces as 'close' and goes through the ordinary reconnect path.
+// ESTABLISHED — the kernel keeps the TCP connection open, so this pipe's
+// 'close' event never fires and the reconnect loop never runs: the
+// zombie-pipe mode (process alive, ext leg alive, plugin leg dead,
+// "pipes: 0"). Two detections, both needed (verified live against the
+// real app on 2026-08-28):
+//   1. liveness ping — a healthy server auto-pongs; transport-level death
+//      (app crash, socket dropped) shows up as a missed pong and, on a real
+//      process exit, as 'close' anyway;
+//   2. handshake count — the abandoned server's socket-level frame handling
+//      SURVIVES the swap and keeps auto-ponging, so (1) alone stays silent.
+//      The plugin's own handshake is the only view of the swap: `pipes`
+//      counts connections the LIVE plugin registered. The pipe is the
+//      plugin's sole WS client, so "I'm OPEN and pinging, but the plugin
+//      reports zero pipes" means our socket belongs to a dead server.
 const PLUGIN_HEARTBEAT_MS = 20000
 const pluginHb = setInterval(() => {
   if (!pluginWs || pluginWs.readyState !== WebSocket.OPEN) return
@@ -427,6 +435,14 @@ const pluginHb = setInterval(() => {
   }
   wsAlive = false
   pluginWs.ping()
+  void fetchPluginHandshake().then((info) => {
+    if (!pluginWs || pluginWs.readyState !== WebSocket.OPEN) return
+    // A missing field is unknown, not zero — only an explicit count acts.
+    if (info && typeof info.pipes === 'number' && info.pipes < 1) {
+      log('plugin handshake reports pipes:0 while pipe is connected — orphaned by hot-swap, reconnecting')
+      pluginWs.terminate() // 'close' handler → scheduleReconnect(openPluginWs)
+    }
+  })
 }, PLUGIN_HEARTBEAT_MS)
 pluginHb.unref()
 
