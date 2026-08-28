@@ -316,6 +316,8 @@ async function routeExtReply(msg) {
 
 // ------------------------------------------------------- plugin channel
 let pluginWs = null
+// F8 (audit, 2026-08-28 field finding): liveness flag for the heartbeat below.
+let wsAlive = true
 function pluginSend(obj) {
   if (pluginWs && pluginWs.readyState === WebSocket.OPEN) pluginWs.send(wireEncode(obj))
 }
@@ -366,7 +368,9 @@ async function openPluginWs() {
   const url = `${DSH_BASE.replace(/^http/, 'ws')}${wsPath}`
   const ws = new WebSocket(url, { headers: WS_TOKEN.token ? { 'x-augmentor-token': WS_TOKEN.token } : {} })
   pluginWs = ws
+  wsAlive = true
   ws.on('open', () => log('plugin ws connected', wsPath))
+  ws.on('pong', () => { wsAlive = true })
   ws.on('message', (data) => {
     const frame = wireDecode(String(data))
     if (!frame || typeof frame !== 'object') return
@@ -402,6 +406,29 @@ async function openPluginWs() {
   })
   ws.on('error', (e) => log('plugin ws error', e.message))
 }
+
+// F8 (audit, 2026-08-28 field finding): the DSH app hot-swaps the plugin
+// module IN-PLACE (a ?src= query bump reloads it inside the same process).
+// The old plugin's WS server is abandoned with its client sockets still
+// ESTABLISHED — the kernel keeps the TCP connection open and silent, so this
+// pipe's 'close' event never fires and the reconnect loop below never runs:
+// the zombie-pipe mode (process alive, ext leg alive, plugin leg dead,
+// "pipes: 0"). A liveness ping catches exactly that: a healthy server
+// auto-pongs, an orphaned socket never does. A real process restart still
+// surfaces as 'close' and goes through the ordinary reconnect path.
+const PLUGIN_HEARTBEAT_MS = 20000
+const pluginHb = setInterval(() => {
+  if (!pluginWs || pluginWs.readyState !== WebSocket.OPEN) return
+  if (!wsAlive) {
+    log('plugin ws stale (no pong) — terminating for reconnect')
+    wsAlive = true
+    pluginWs.terminate() // 'close' handler → scheduleReconnect(openPluginWs)
+    return
+  }
+  wsAlive = false
+  pluginWs.ping()
+}, PLUGIN_HEARTBEAT_MS)
+pluginHb.unref()
 
 // ------------------------------------------------------------ downlinks
 const downlinks = new Map() // 'mux' | 'host' → {ws, open}
