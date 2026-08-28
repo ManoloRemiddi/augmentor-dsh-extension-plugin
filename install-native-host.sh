@@ -29,6 +29,7 @@ AUGMENTOR_DIR="$(cd "$(dirname "$0")" && pwd)"
 # The host is the /api pipe (pipe.mjs) — the browser talks to DSH over a
 # loopback /api relay, no sidecar bridge.
 HOST_SH="$AUGMENTOR_DIR/bin/pipe-host.sh"
+mkdir -p "$AUGMENTOR_DIR/bin"
 cat > "$HOST_SH" <<EOF
 #!/bin/sh
 # Augmentor — dsh-augmentor plugin, pipe, and Chromium extension
