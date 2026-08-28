@@ -201,6 +201,7 @@ const chromeFlags = [
   `--load-extension=${path.join(REPO_DIR, 'extension')}`,
   '--disable-extensions-except=' + path.join(REPO_DIR, 'extension'),
   '--no-first-run', '--no-default-browser-check',
+  '--disable-dev-shm-usage', // CI runners have a 64MB /dev/shm; Chrome crashes without this
   ...(process.getuid?.() === 0 ? ['--no-sandbox'] : []),
   'about:blank',
 ]
@@ -224,7 +225,10 @@ for (let i = 0; i < 60 && !extId; i++) {
   }
   await sleep(1000)
 }
-if (!extId) fail('chromium + unpacked extension', 'no extension id in fresh profile')
+if (!extId) {
+  const tail = existsSync(chromeLog) ? readFileSync(chromeLog, 'utf8').split('\n').slice(-15).join('\n') : '(no chrome log)'
+  fail('chromium + unpacked extension', `no extension id in fresh profile — chrome log tail:\n${tail}`)
+}
 ok('chromium + unpacked extension (real id from fresh profile)', extId)
 
 // ============================================================ 8. documented installer
@@ -239,7 +243,19 @@ ok('install-native-host.sh <id> <chrome-user-data-dir>', 'manifest + launcher + 
 
 // ============================================================ 9. restart app + Chrome
 for (const { proc } of children) { try { process.kill(-proc.pid, 'SIGTERM') } catch {} }
-await sleep(3000)
+// the old app must actually release the port before the new one binds —
+// otherwise the 200s in the polls below come from the DYING (plugin-less) app
+const portFree = () => new Promise((res) => {
+  const s = createServer()
+  s.once('error', () => res(false))
+  s.once('listening', () => { s.close(() => res(true)) })
+  s.listen(PORT, '127.0.0.1')
+})
+for (let i = 0; i < 20 && !(await portFree()); i++) {
+  if (i === 12) for (const { proc } of children) { try { process.kill(-proc.pid, 'SIGKILL') } catch {} }
+  await sleep(1000)
+}
+if (!(await portFree())) fail('app + chromium restart', `old app still holds port ${PORT}`)
 const app2 = track(spawn(DSH_BIN, ['web', '--no-open', '--port', String(PORT)], {
   env: appEnv, detached: true, stdio: ['ignore', appLogFd, appLogFd],
 }), 'dsh app (restart)')
@@ -248,7 +264,7 @@ for (let i = 0; i < 45; i++) {
   try { if ((await fetch(`http://127.0.0.1:${PORT}/`)).status === 200) break } catch {}
   await sleep(2000)
 }
-ok('app + chromium restart', 'relaunched')
+ok('app + chromium restart', 'relaunched on a free port')
 
 // ============================================================ 10. full chain: pipes: 1
 let hs = null
@@ -260,10 +276,11 @@ for (let i = 0; i < 60; i++) {
   } catch {}
   await sleep(2000)
 }
-if (!hs) fail('full chain (Chrome→NMH→pipe→plugin)', 'no handshake after restart')
+const appTail = () => existsSync(appLog) ? '\napp log tail:\n' + readFileSync(appLog, 'utf8').split('\n').slice(-15).join('\n') : ''
+if (!hs) fail('full chain (Chrome→NMH→pipe→plugin)', 'no handshake after restart' + appTail())
 if (hs.pipes < 1) {
   const pipeTail = existsSync(chromeLog) ? readFileSync(chromeLog, 'utf8').split('\n').slice(-12).join('\n') : ''
-  fail('full chain (Chrome→NMH→pipe→plugin)', `pipes=${hs.pipes} — chrome log tail:\n${pipeTail}`)
+  fail('full chain (Chrome→NMH→pipe→plugin)', `pipes=${hs.pipes} — chrome log tail:\n${pipeTail}${appTail()}`)
 }
 ok('full chain: handshake pipes: 1', `${((Date.now() - tChain) / 1000).toFixed(1)}s (Chrome→NMH→pipe.mjs→WS→plugin)`)
 
