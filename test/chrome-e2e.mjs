@@ -1,3 +1,8 @@
+// Augmentor — dsh-augmentor plugin, pipe, and Chromium extension
+// Copyright © 2026 Manolo Remiddi
+// SPDX-License-Identifier: MIT
+// License: MIT — see LICENSE at the repository root.
+
 // M1 acceptance in REAL Chrome (headless=new, CDP-driven):
 // fresh user-data-dir (the user's browser is never touched) + --load-extension
 // (same extension dir as the user's install) + host manifest copied into the

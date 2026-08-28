@@ -1,4 +1,10 @@
 #!/bin/sh
+
+# Augmentor — dsh-augmentor plugin, pipe, and Chromium extension
+# Copyright © 2026 Manolo Remiddi
+# SPDX-License-Identifier: MIT
+# License: MIT — see LICENSE at the repository root.
+
 # Real-composition boot test for dsh-augmentor.
 #
 # Boots a SEPARATE live `dsh web` instance (same npm CLI as the user's running

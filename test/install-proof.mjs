@@ -1,4 +1,10 @@
 #!/usr/bin/env node
+
+// Augmentor — dsh-augmentor plugin, pipe, and Chromium extension
+// Copyright © 2026 Manolo Remiddi
+// SPDX-License-Identifier: MIT
+// License: MIT — see LICENSE at the repository root.
+
 // install-proof.mjs — deterministic proof of the documented install journey.
 //
 // It runs a FRESH USER on a throwaway machine:

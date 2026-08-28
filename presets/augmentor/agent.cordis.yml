@@ -1,3 +1,8 @@
+# Augmentor — dsh-augmentor plugin, pipe, and Chromium extension
+# Copyright © 2026 Manolo Remiddi
+# SPDX-License-Identifier: MIT
+# License: MIT — see LICENSE at the repository root.
+
 # The `augmentor` agent preset: the Augmentor browser agent — the persona the
 # retired M0 sidecar bridge carried as DSH_SYSTEM_PROMPT (persona.md, ported
 # into the five browser_* tools' descriptions), so a session named `augmentor`

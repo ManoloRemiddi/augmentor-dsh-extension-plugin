@@ -1,3 +1,8 @@
+// Augmentor — dsh-augmentor plugin, pipe, and Chromium extension
+// Copyright © 2026 Manolo Remiddi
+// SPDX-License-Identifier: MIT
+// License: MIT — see LICENSE at the repository root.
+
 /* Pre-paint theme + color restore, runs synchronously before first paint.
  *
  * This must be a file: MV3's default extension-page CSP (script-src 'self',

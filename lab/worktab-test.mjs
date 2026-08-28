@@ -1,4 +1,10 @@
 #!/usr/bin/env node
+
+// Augmentor — dsh-augmentor plugin, pipe, and Chromium extension
+// Copyright © 2026 Manolo Remiddi
+// SPDX-License-Identifier: MIT
+// License: MIT — see LICENSE at the repository root.
+
 /**
  * workTab() A/B test — loads extension/sw.js (or any sw source) into a VM
  * with a stubbed chrome API and exercises tab resolution.

@@ -1,3 +1,8 @@
+// Augmentor — dsh-augmentor plugin, pipe, and Chromium extension
+// Copyright © 2026 Manolo Remiddi
+// SPDX-License-Identifier: MIT
+// License: MIT — see LICENSE at the repository root.
+
 /* Augmentor — shared color math (classic script, no DOM at top level).
  *
  * One source of truth for the user-tunable palette:

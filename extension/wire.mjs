@@ -1,3 +1,8 @@
+// Augmentor — dsh-augmentor plugin, pipe, and Chromium extension
+// Copyright © 2026 Manolo Remiddi
+// SPDX-License-Identifier: MIT
+// License: MIT — see LICENSE at the repository root.
+
 /* Augmentor — shared wire primitives (F5, audit).
  *
  * One implementation of the JSON-frame vocabulary the three runtimes speak:

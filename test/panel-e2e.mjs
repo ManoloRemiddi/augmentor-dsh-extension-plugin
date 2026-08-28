@@ -1,3 +1,8 @@
+// Augmentor — dsh-augmentor plugin, pipe, and Chromium extension
+// Copyright © 2026 Manolo Remiddi
+// SPDX-License-Identifier: MIT
+// License: MIT — see LICENSE at the repository root.
+
 // M1 exit proof, headless: REAL sidepanel.js + chat-render.js (ES modules in
 // jsdom) + REAL sw.js (module realm via vm.SourceTextModule — F1: sw.js is a
 // module service worker) + REAL pipe (host-manifest spawn) + live DSH server.

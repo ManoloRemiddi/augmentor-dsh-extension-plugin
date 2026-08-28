@@ -1,4 +1,10 @@
 #!/usr/bin/env python3
+
+# Augmentor — dsh-augmentor plugin, pipe, and Chromium extension
+# Copyright © 2026 Manolo Remiddi
+# SPDX-License-Identifier: MIT
+# License: MIT — see LICENSE at the repository root.
+
 """Overlay verification driver (lab). Drives cdp.mjs / dsh-browser.mjs and
 asserts DOM + pixel state. Usage: python3 lab-overlay-verify.py <stage>
 stages:

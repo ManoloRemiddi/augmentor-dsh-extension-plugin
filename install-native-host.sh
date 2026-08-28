@@ -1,4 +1,10 @@
 #!/bin/sh
+
+# Augmentor — dsh-augmentor plugin, pipe, and Chromium extension
+# Copyright © 2026 Manolo Remiddi
+# SPDX-License-Identifier: MIT
+# License: MIT — see LICENSE at the repository root.
+
 # Installs the Chromium native messaging host manifest for the Augmentor pipe.
 #
 # usage: ./install-native-host.sh <extension-id> [config-dir]
@@ -25,6 +31,10 @@ AUGMENTOR_DIR="$(cd "$(dirname "$0")" && pwd)"
 HOST_SH="$AUGMENTOR_DIR/bin/pipe-host.sh"
 cat > "$HOST_SH" <<EOF
 #!/bin/sh
+# Augmentor — dsh-augmentor plugin, pipe, and Chromium extension
+# Copyright © 2026 Manolo Remiddi
+# SPDX-License-Identifier: MIT
+# License: MIT — see LICENSE at the repository root.
 exec "$NODE_BIN" "$AUGMENTOR_DIR/pipe.mjs"
 EOF
 chmod +x "$HOST_SH"

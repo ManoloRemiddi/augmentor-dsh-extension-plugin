@@ -1,4 +1,10 @@
 #!/usr/bin/env node
+
+// Augmentor — dsh-augmentor plugin, pipe, and Chromium extension
+// Copyright © 2026 Manolo Remiddi
+// SPDX-License-Identifier: MIT
+// License: MIT — see LICENSE at the repository root.
+
 /**
  * Website screenshots (website/assets/shot-*.png) — real Chromium, real
  * extension, one REAL turn against the live DSH deployment.

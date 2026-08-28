@@ -1,3 +1,8 @@
+// Augmentor — dsh-augmentor plugin, pipe, and Chromium extension
+// Copyright © 2026 Manolo Remiddi
+// SPDX-License-Identifier: MIT
+// License: MIT — see LICENSE at the repository root.
+
 /**
  * Augmentor — the "AI control" veil: show/fade/early-retry + the human
  * status line (extension/overlay.mjs).

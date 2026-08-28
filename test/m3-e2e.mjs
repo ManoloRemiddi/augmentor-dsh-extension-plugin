@@ -1,3 +1,8 @@
+// Augmentor — dsh-augmentor plugin, pipe, and Chromium extension
+// Copyright © 2026 Manolo Remiddi
+// SPDX-License-Identifier: MIT
+// License: MIT — see LICENSE at the repository root.
+
 // M3 slice-1 acceptance in REAL Chrome (headless=new, CDP-driven): the panel's
 // Save button works end to end against the LIVE DSH server and the real
 // registry — the boot test proves the wire on a fresh copy; this proves the
