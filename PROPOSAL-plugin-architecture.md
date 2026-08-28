@@ -1778,5 +1778,38 @@ sw / panel / m3 / chrome / m2 / tools e2e + plugin/tests/boot/run.sh
 (fresh-copy, token-gated, ALL PASS); live re-run of m3 / chrome / m2
 after the hot-reload; header-only auth probe against the live app.
 
+Field finding F8 — zombie pipe after plugin hot-swap (2026-08-28): user
+reported the Augmentor "felt like it didn't know the tools it had" (first
+instinct: "I can't do it"), overlay gone. The user's own Augmentor session
+(augmentor-1aca9fab) traced it: the pipe was a ZOMBIE — process alive,
+ext leg alive, plugin leg dead, `pipes: 0` — since the Tier-3 hot-swap
+reloaded the plugin. Root cause, verified live against the running app:
+the DSH app hot-swaps the plugin module IN-PLACE (a `?src=` query bump
+reloads it inside the same process). The old plugin's WS server is
+abandoned with client sockets still ESTABLISHED, so the pipe's `close`
+event never fires and the reconnect loop never runs. Two detection
+layers were needed (each alone is insufficient, both proven live):
+- F8 (538e752): 20 s liveness ping — a healthy server auto-pongs.
+  Insufficient by itself: the abandoned server's socket-level frame
+  handling SURVIVES the swap and keeps auto-ponging (app-side Recv-Q
+  stays 0, pongs flow, `pipes: 0` persists, no stale log).
+- F8b (4ca6669): the heartbeat also refetches the plugin's handshake.
+  The pipe is the plugin's sole WS client, so "I'm OPEN and pinging, but
+  the plugin reports `pipes: 0`" means our socket belongs to a dead
+  server → terminate → ordinary reconnect path. A missing field is
+  unknown, not zero.
+Verified live end-to-end: reproduced the zombie twice (538e752 and
+4ca6669 bumps, same plugin content — pure orphan event); the F8b pipe
+detected the orphan on its first post-swap tick and reconnected in ~1 s
+(trace: `plugin handshake reports pipes:0 while pipe is connected —
+orphaned by hot-swap, reconnecting` → `plugin ws closed; retrying` →
+`plugin ws connected` → `plugin hello`), then stable on subsequent
+ticks; live handshake `pipes: 1`; the user's Chrome respawned the fixed
+pipe (no user action needed). sw-e2e re-run green (E2E: OK). The
+extension itself was never at fault — it ran 0.1.26 and respawned the
+pipe correctly; the "can't do it" first instinct was the model's honest
+report of a dead browser link (its second turn diagnosed and fixed the
+pipe itself, then completed the npm publish via browser + passkey).
+
 Note: `augmentor/README.md` (product repo) is badly stale (M0 sidecar, local
 DSH clone, `session/interrupt` patches) — not part of this pass.
