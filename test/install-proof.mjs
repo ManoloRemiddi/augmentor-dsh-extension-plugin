@@ -222,8 +222,16 @@ const chromeFlags = [
 const chromeLog = path.join(WORK, 'chrome.log')
 const chromeLogFd = openSync(chromeLog, 'a')
 let chrome = track(spawn(CHROME_BIN, chromeFlags, { env: chromeEnv, detached: true, stdio: ['ignore', chromeLogFd, chromeLogFd] }), 'chromium')
-// real unpacked id: read from the fresh profile (Linux ids are path-derived)
-const BUILTIN_IDS = new Set(['mhjfbmdgcfjbbpaeojofohoefgiehjai'])
+// real unpacked id: read from the fresh profile. ANCHOR ON THE PATH — the
+// settings entry of an unpacked extension carries its absolute load path, so
+// match the exact directory we passed to --load-extension. Never pick the
+// first [a-p]{32} id: the Chrome-for-Testing builds (Playwright's CI
+// chromium) ship a Chrome-Web-Store component extension (web_store,
+// location 5) into the profile BEFORE our unpacked one, and its id would
+// poison the NMH manifest's allowed_origins -> connectNative denied ->
+// pipes=0, while the log stays silent (access denials land in the SW
+// console, not chrome's stderr).
+const extLoadDir = path.join(REPO_DIR, 'extension')
 let extId = ''
 for (let i = 0; i < 60 && !extId; i++) {
   if (!existsSync(CHROME_DIR)) { await sleep(1000) ; continue }
@@ -232,8 +240,8 @@ for (let i = 0; i < 60 && !extId; i++) {
     if (!existsSync(pf)) continue
     try {
       const p = JSON.parse(readFileSync(pf, 'utf8'))
-      extId = Object.keys(p?.extensions?.settings ?? {})
-        .find((k) => /^[a-p]{32}$/.test(k) && !BUILTIN_IDS.has(k)) ?? ''
+      extId = Object.entries(p?.extensions?.settings ?? {})
+        .find(([id, v]) => /^[a-p]{32}$/.test(id) && v?.path && path.resolve(String(v.path)) === extLoadDir)?.[0] ?? ''
     } catch {}
     if (extId) break
   }
@@ -301,8 +309,22 @@ for (let i = 0; i < 60; i++) {
 const appTail = () => existsSync(appLog) ? '\napp log tail:\n' + readFileSync(appLog, 'utf8').split('\n').slice(-15).join('\n') : ''
 if (!hs) fail('full chain (Chrome→NMH→pipe→plugin)', 'no handshake after restart' + appTail())
 if (hs.pipes < 1) {
-  const pipeTail = existsSync(chromeLog) ? readFileSync(chromeLog, 'utf8').split('\n').slice(-12).join('\n') : ''
-  fail('full chain (Chrome→NMH→pipe→plugin)', `pipes=${hs.pipes} — chrome log tail:\n${pipeTail}${appTail()}`)
+  // A dead transport usually announces itself once, early (native-messaging
+  // spawn/access error) — the log TAIL is GCM/dbus noise. Surface every
+  // line that looks like the actual problem, then the tail.
+  const diag = (() => {
+    if (!existsSync(chromeLog)) return '(no chrome log)'
+    const lines = readFileSync(chromeLog, 'utf8').split('\n')
+    const hits = lines
+      .map((l, i) => [i, l])
+      .filter(([, l]) => /native|host|FATAL|Check failed|Cannot find|ENOENT|EACCES|EPERM|error.*launch|launch.*error|access denied/i.test(l))
+      .filter(([, l]) => !/gcm|dbus|dbus|registration_request|vkCreateInstance|VulkanError|maxDynamic/i.test(l))
+      .slice(0, 25)
+      .map(([i, l]) => `L${i + 1}: ${l}`)
+      .join('\n')
+    return (hits ? hits + '\n…\n' : '(no suspicious lines — full tail follows)\n') + lines.slice(-10).join('\n')
+  })()
+  fail('full chain (Chrome→NMH→pipe→plugin)', `pipes=${hs.pipes} — chrome log:\n${diag}${appTail()}`)
 }
 ok('full chain: handshake pipes: 1', `${((Date.now() - tChain) / 1000).toFixed(1)}s (Chrome→NMH→pipe.mjs→WS→plugin)`)
 
