@@ -118,6 +118,18 @@ jobs:
           PROOF_NPM_SPEC: "dsh-augmentor@${{ env.VER }}"
         run: |
           export CHROME_BIN="$(ls -d "$HOME/.cache/ms-playwright/chromium-"*/chrome-linux*/chrome | head -n1)"
+          # A fresh publish is not instantly resolvable: npm itself says it
+          # "may take a few minutes to become available". The very first
+          # release run proved the package 6 s after publishing and pnpm
+          # could not resolve it. Wait for the version to be visible
+          # (up to 5 min), then run the pinned proof.
+          for i in $(seq 1 30); do
+            [ "$(npm view "dsh-augmentor@$VER" version 2>/dev/null)" = "$VER" ] && break
+            echo "waiting for registry propagation ($i/30)…"
+            sleep 10
+          done
+          [ "$(npm view "dsh-augmentor@$VER" version 2>/dev/null)" = "$VER" ] \
+            || { echo "::error::dsh-augmentor@$VER not visible on the registry after 5 min"; exit 1; }
           node test/install-proof.mjs
 
       - name: GitHub Release (notes + asset)
