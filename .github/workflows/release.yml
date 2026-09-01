@@ -100,6 +100,11 @@ jobs:
       - name: Publish to npm (provenance; skip when already published)
         working-directory: plugin
         run: |
+          # npm publish runs the package's `prepare` (esbuild bundle), so the
+          # plugin's own devDependencies must be installed first — nothing
+          # earlier in this workflow touches plugin/ (the install-proof
+          # steps clone their own copies).
+          pnpm install --frozen-lockfile
           if [ "$(npm view "dsh-augmentor@$VER" version 2>/dev/null)" = "$VER" ]; then
             echo "dsh-augmentor@$VER is already published — skipping npm publish"
           else

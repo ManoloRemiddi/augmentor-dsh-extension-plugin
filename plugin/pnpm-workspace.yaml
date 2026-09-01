@@ -4,4 +4,8 @@
 # License: MIT — see LICENSE at the repository root.
 
 allowBuilds:
-  esbuild: set this to true or false
+  # esbuild's postinstall verifies the platform binary (the binary itself
+  # ships via the @esbuild/linux-x64 optional dep, so this is belt-and-
+  # braces). Required for `npm publish` on CI, where the plugin deps are
+  # installed fresh.
+  esbuild: true
