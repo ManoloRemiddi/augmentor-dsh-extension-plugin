@@ -27,3 +27,6 @@ node_modules/
 
 # local site — not part of the extension
 website/
+
+# release pack output (scripts/pack-release.sh) — built, not committed
+dist/
