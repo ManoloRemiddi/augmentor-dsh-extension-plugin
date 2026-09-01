@@ -17,7 +17,7 @@
  * Unknown actions still fail loudly with `unknown action`.
  */
 import { state, log } from './state.mjs'
-import { workTab, readableWorkTab, inject, injectFiles, waitForLoad, focusedWindowId } from './worktab.mjs'
+import { workTab, readableWorkTab, inject, injectFiles, waitForLoad, focusedWindowId, isDshTab } from './worktab.mjs'
 import { overlayShow, overlayTextFor, pulseRgba } from './overlay.mjs'
 
 function summarize(obj) {
@@ -46,6 +46,9 @@ export async function handleBrowserAction(id, params) {
             title: t.title ?? null,
             active: !!t.active,
             focusedWindow: wid != null && !!t.active && t.windowId === wid,
+            // The tab hosting the user's DSH web session: the agent never
+            // navigates it (navigate opens a dedicated tab instead).
+            ...(isDshTab(t) ? { dsh: true } : {}),
           })),
         }
         try {
@@ -172,6 +175,7 @@ export async function handleBrowserAction(id, params) {
       let msg = String(e?.message ?? e)
       if (/no element matches selector/i.test(msg)) msg = "couldn't find that element on the page"
       else if (/new tab page/i.test(msg)) msg = 'this tab is empty — ask me to open a page first'
+      else if (/DSH session/i.test(msg)) msg = 'this tab is your DSH session — I open a new tab for browser work'
       overlayShow(state.workTabId ?? state.overlayTabId, `⚠ ${msg.slice(0, 70)}`)
     } catch {}
     return { ok: false, error: String(e?.message ?? e), ms: Date.now() - t0 }

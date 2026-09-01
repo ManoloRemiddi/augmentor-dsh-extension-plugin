@@ -317,6 +317,13 @@
   .mp-strip button { border: 1px solid var(--border2); background: transparent; color: var(--text2);
     font-size: 10.5px; font-weight: 600; border-radius: 5px; padding: 2px 8px; cursor: pointer; }
   .mp-strip button:hover { background: var(--hover); color: var(--text); }
+  /* Model popover Refresh footer: forces a fresh bridge catalog fetch (see
+     #modelpop markup). Reuses the strip/button look of the retry strip. */
+  #modelpop-foot { border-top: 1px solid var(--border); margin-top: 4px; }
+  #modelpop-foot-status { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #modelpop-refresh { display: inline-flex; align-items: center; gap: 4px; flex: none; }
+  #modelpop-refresh svg { flex: none; }
+  #modelpop-refresh:disabled { opacity: 0.5; cursor: default; }
   /* Sessions popover (M1): browse the DSH app's own sessions. One row per
      session — running dot, title (or cwd), last-activity time. A fence-probe
      strip at the bottom records the C1 trust-fence evidence. */
@@ -479,9 +486,19 @@
     Brightness shifts lightness in both themes.</p>
 </div>
 <!-- Model picker popover (opened by the #model chip in the strip): the DSH
-     app's model catalog, rows rendered by sidepanel.js. -->
+     app's model catalog, rows rendered by sidepanel.js. The footer's
+     Refresh button forces a fresh bridge catalog fetch: the SW serves the
+     handshake's memory copy otherwise, and the DSH app's model set can
+     change while the panel is open (a model added to settings.yaml). -->
 <div id="modelpop" hidden role="dialog" aria-label="Choose model">
   <div id="modelpop-body"></div>
+  <div id="modelpop-foot" class="mp-strip">
+    <span id="modelpop-foot-status" role="status"></span>
+    <button id="modelpop-refresh" type="button" title="Re-read the model list from the DSH app">
+      <svg width="11" height="11" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M13.65 5.35A6 6 0 1 0 14 8"/><path d="M14 2v3.35h-3.35"/></svg>
+      Refresh
+    </button>
+  </div>
 </div>
 <div id="sessionspop" hidden role="dialog" aria-label="DSH app sessions">
   <div id="sessionspop-body"></div>

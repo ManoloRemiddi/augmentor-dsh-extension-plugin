@@ -21,7 +21,9 @@ import { state } from './state.mjs'
 // sequence stays on one tab even if the user flips tabs mid-turn. A new tab
 // page / blank tab counts as "the user's tab": there is no content to read
 // there yet, but navigate can turn it into a real page. Never an extension
-// page (the panel's tab, when opened in a window, is active there).
+// page (the panel's tab, when opened in a window, is active there), and
+// never the user's DSH session tab (the web GUI the agent is talking
+// through): navigate opens a dedicated tab instead of navigating it away.
 const SELF_ORIGIN = 'chrome-extension://' + chrome.runtime.id + '/'
 function isWorkTab(t) {
   const u = t?.url ?? ''
@@ -34,6 +36,49 @@ function isWorkTab(t) {
 function isEmptyTab(t) {
   const u = t?.url ?? ''
   return u === 'about:blank' || /^chrome:\/\/newtab/i.test(u) || /^about:newtab/i.test(u)
+}
+// ------------------------------------------------- the user's DSH session
+// A tab on the origin of the running DSH web app hosts the user's OWN DSH
+// session — the very session the agent is talking through. Navigating such a
+// tab away would drop the user's session, so the agent never works on it:
+// navigate opens a dedicated tab instead (actions.mjs's catch is the
+// new-tab path), and the read actions fail with a directive error. The
+// pipe reports the app's base URL in the initialize handshake
+// (state.endpoint, set before phase 'ready', hence known for every browser
+// action). localhost and 127.0.0.1 name the same loopback server, so both
+// spellings count as the same origin.
+function dshOrigin() {
+  const base = state.endpoint
+  if (typeof base !== 'string' || !base) return null
+  let u
+  try {
+    u = new URL(base)
+  } catch {
+    return null
+  }
+  if (u.protocol !== 'http:' && u.protocol !== 'https:') return null
+  const normHost = (h) => (h.toLowerCase() === 'localhost' ? '127.0.0.1' : h.toLowerCase())
+  const defPort = u.protocol === 'https:' ? '443' : '80'
+  return { protocol: u.protocol, host: normHost(u.hostname), port: u.port || defPort }
+}
+export function isDshTab(t) {
+  const base = dshOrigin()
+  if (!base) return false
+  const u = t?.url ?? ''
+  if (!u) return false
+  let x
+  try {
+    x = new URL(u)
+  } catch {
+    return false
+  }
+  const normHost = (h) => (h.toLowerCase() === 'localhost' ? '127.0.0.1' : h.toLowerCase())
+  const defPort = x.protocol === 'https:' ? '443' : '80'
+  return (
+    x.protocol === base.protocol &&
+    normHost(x.hostname) === base.host &&
+    (x.port || defPort) === base.port
+  )
 }
 // The window the user is looking at (last focused). From the service
 // worker, a `currentWindow: true` tab query already resolves against the
@@ -77,7 +122,9 @@ export async function workTab() {
   if (state.workTabId != null) {
     try {
       const t = await chrome.tabs.get(state.workTabId)
-      if (isWorkTab(t) || isEmptyTab(t)) return t
+      // A sticky tab the user navigated onto the DSH GUI is the user's
+      // session again: drop the stickiness and re-resolve.
+      if (!isDshTab(t) && (isWorkTab(t) || isEmptyTab(t))) return t
     } catch { /* tab closed */ }
     state.workTabId = null
   }
@@ -98,6 +145,16 @@ export async function workTab() {
       null
   }
   if (active && (isWorkTab(active) || isEmptyTab(active))) {
+    // The user's own DSH session is on screen. Throw — do NOT fall through
+    // to the recency fallback (that would quietly hijack another tab the
+    // user is not looking at): navigate's catch is the new-tab path, and
+    // the read actions surface a directive error instead.
+    if (isDshTab(active)) {
+      state.workTabId = null
+      throw new Error(
+        'the tab the user is on is their DSH session — the agent works in a dedicated tab; call browser_navigate to open a URL',
+      )
+    }
     state.workTabId = active.id
     return active
   }
@@ -106,7 +163,8 @@ export async function workTab() {
   //    usable tab (tracked via onActivated) — never the first tab in the
   //    list, which is where the old session-long stickiness landed.
   const tabs = await chrome.tabs.query({})
-  const usable = tabs.filter(isWorkTab)
+  // DSH session tabs are never fallback candidates (see dshOrigin above).
+  const usable = tabs.filter((t) => isWorkTab(t) && !isDshTab(t))
   if (!usable.length) throw new Error('no usable browser tab')
   const byRecency = [...usable].sort((a, b) => (recentActive.get(b.id) ?? 0) - (recentActive.get(a.id) ?? 0))
   const pick = byRecency[0]

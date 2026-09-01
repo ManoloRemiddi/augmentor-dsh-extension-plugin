@@ -377,7 +377,7 @@ function apply(ctx, config) {
   }
   ctx.tools.register(defineTool({
     name: "browser_tabs_list",
-    description: "List the browser tabs the Augmentor extension can see, through its native pipe. Returns {ok: true, tabs} when a browser client is connected and {ok: false, error} when none is.",
+    description: "List the browser tabs the Augmentor extension can see, through its native pipe. Tabs hosting the user's DSH web session carry a `dsh: true` marker: the agent never navigates those \u2014 browser_navigate opens a dedicated tab instead. Returns {ok: true, tabs} when a browser client is connected and {ok: false, error} when none is.",
     parameters: {},
     output: {
       schema: {
@@ -400,7 +400,9 @@ function apply(ctx, config) {
                 url: { oneOf: [{ type: "string" }, { type: "null" }] },
                 title: { oneOf: [{ type: "string" }, { type: "null" }] },
                 active: { type: "boolean", required: true },
-                focusedWindow: { type: "boolean", required: true }
+                focusedWindow: { type: "boolean", required: true },
+                // Set only on the tab hosting the user's DSH web session.
+                dsh: { type: "boolean" }
               }
             }
           },
@@ -410,7 +412,7 @@ function apply(ctx, config) {
       render: (_args, value) => {
         if (!value.ok) return [{ type: "text", text: value.error ?? "no tabs" }];
         if (!value.tabs.length) return [{ type: "text", text: "0 tabs open in the user's browser" }];
-        return [{ type: "text", text: value.tabs.map((t) => `tab ${t.id ?? "?"}${t.active ? " [active]" : ""}${t.focusedWindow ? " [focused window]" : ""}: ${t.title ?? "(untitled)"} \u2014 ${t.url ?? "(no url yet)"}`).join("\n") }];
+        return [{ type: "text", text: value.tabs.map((t) => `tab ${t.id ?? "?"}${t.active ? " [active]" : ""}${t.focusedWindow ? " [focused window]" : ""}${t.dsh ? " [DSH session]" : ""}: ${t.title ?? "(untitled)"} \u2014 ${t.url ?? "(no url yet)"}`).join("\n") }];
       }
     },
     async execute(_args, exec) {
@@ -424,7 +426,7 @@ function apply(ctx, config) {
   const act = (params) => browserRequest(params, config.commandTimeoutMs);
   ctx.tools.register(defineTool({
     name: "browser_navigate",
-    description: "Open an http(s) URL in the user's real browser. It navigates the agent's current work tab (creating a dedicated tab if there is no workable one) and a frost veil with progress is shown on that tab while it runs. Returns the settled URL and page title. Prefer this over any other way of reaching a page, then use browser_snapshot to read what loaded.",
+    description: "Open an http(s) URL in the user's real browser. It navigates the agent's current work tab (creating a dedicated tab if there is no workable one, or if the current tab is the user's DSH session \u2014 that tab is never navigated away) and a frost veil with progress is shown on that tab while it runs. Returns the settled URL and page title. Prefer this over any other way of reaching a page, then use browser_snapshot to read what loaded.",
     parameters: {
       url: { type: "string", required: true, description: "The http or https URL to open." }
     },
@@ -454,7 +456,7 @@ function apply(ctx, config) {
   }));
   ctx.tools.register(defineTool({
     name: "browser_snapshot",
-    description: "Read the agent's current work tab in the user's browser: page title, URL, visible text (up to 6000 characters) and the first 40 links. This is how you see a page after browser_navigate and before browser_click / browser_type. Fails when the work tab is not a readable http(s) page (e.g. the new-tab page).",
+    description: "Read the agent's current work tab in the user's browser: page title, URL, visible text (up to 6000 characters) and the first 40 links. This is how you see a page after browser_navigate and before browser_click / browser_type. Fails when the work tab is not a readable http(s) page (e.g. the new-tab page) or when the user's tab is their DSH session \u2014 in that case call browser_navigate, which opens a dedicated tab.",
     parameters: {},
     output: {
       schema: {

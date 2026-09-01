@@ -7,10 +7,10 @@
  * Augmentor — the side panel's message API (extension/panel-api.mjs).
  *
  * F1 (audit): extracted from the sw.js monolith. Everything the panel
- * (sidepanel.js) can ask for: connect/status, prompt, stop, log, models,
- * model switch, newchat, save/unsave, session list/history/view/rename,
- * settings describe/mutate, the fence probe, and shutdown. sw.js registers
- * this as the runtime.onMessage listener.
+ * (sidepanel.js) can ask for: connect/status, prompt, stop, log, models
+ * (+ models-refresh), model switch, newchat, save/unsave, session
+ * list/history/view/rename, settings describe/mutate, the fence probe, and
+ * shutdown. sw.js registers this as the runtime.onMessage listener.
  */
 import {
   state,
@@ -226,6 +226,30 @@ export function handlePanelMessage(msg, sender, sendResponse) {
       .then((catalog) => {
         state.catalog = Array.isArray(catalog?.groups) ? catalog.groups : []
         respond(state.catalog, catalog?.error ?? null)
+      })
+      .catch((e) => sendResponse({ ok: false, groups: null, selection: state.selection, error: e.message }))
+    return true // async
+  }
+  if (msg?.type === 'models-refresh') {
+    // The picker's Refresh button: always re-ask the bridge instead of
+    // serving the handshake's memory copy — the user may have added models
+    // to $DSH_HOME/settings.yaml since. The bridge reads the DSH app live on
+    // every call (pipe.mjs 'augmentor/models'), so no restart is involved.
+    // If the current selection fell out of the catalog, fall back to the
+    // catalog default — the same rule the connect handshake applies.
+    if (!state.port) {
+      sendResponse({ ok: false, groups: null, selection: state.selection, error: state.error ?? `not ready (phase: ${state.phase})` })
+      return
+    }
+    request('augmentor/models')
+      .then((catalog) => {
+        const groups = Array.isArray(catalog?.groups) ? catalog.groups : []
+        const inCatalog = (sel) =>
+          !!sel &&
+          groups.some((g) => g.provider === sel.provider && g.models.some((m) => m.model === sel.model))
+        if (!inCatalog(state.selection) && catalog?.default) state.selection = { ...catalog.default }
+        state.catalog = groups
+        sendResponse({ ok: true, groups, selection: state.selection, error: catalog?.error ?? null })
       })
       .catch((e) => sendResponse({ ok: false, groups: null, selection: state.selection, error: e.message }))
     return true // async

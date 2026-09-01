@@ -97,6 +97,9 @@ const modelBtn = document.getElementById('model')
 const modelLabel = document.getElementById('model-label')
 const modelPop = document.getElementById('modelpop')
 const modelPopBody = document.getElementById('modelpop-body')
+const modelPopRefresh = document.getElementById('modelpop-refresh')
+const modelPopFoot = document.getElementById('modelpop-foot')
+const modelPopFootStatus = document.getElementById('modelpop-foot-status')
 let pickerCatalog = null // groups: [{provider, name, models: [{provider, model, name}]}]
 let pickerSelection = null // {provider, model}
 
@@ -191,6 +194,34 @@ async function fetchModels() {
   }
   renderPicker()
 }
+
+// Refresh button: the SW answers the picker from its handshake memory, so
+// a model added to the DSH app (settings.yaml) while the panel is open
+// never appears. 'models-refresh' forces the SW to re-ask the bridge,
+// which reads the DSH app live. On error the previous list stays visible;
+// the failure text rides the footer.
+async function refreshModels() {
+  if (modelPopRefresh.disabled) return
+  modelPopRefresh.disabled = true
+  modelPopFootStatus.textContent = ''
+  modelPopFoot.classList.remove('err')
+  try {
+    const res = await send('models-refresh')
+    if (res?.ok) {
+      pickerCatalog = res.groups
+      if (res.selection) pickerSelection = res.selection
+    } else if (res?.error) {
+      modelPopFootStatus.textContent = res.error
+      modelPopFoot.classList.add('err')
+    }
+  } catch {
+    /* SW not ready */
+  }
+  modelPopRefresh.disabled = false
+  renderPicker()
+}
+
+modelPopRefresh.addEventListener('click', refreshModels)
 
 // Picked a row: ask the SW to switch (bridge restarts the runtime, the SW
 // re-initializes it with the new selection, the session resumes from its
