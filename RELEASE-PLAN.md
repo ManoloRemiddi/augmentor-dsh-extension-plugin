@@ -63,6 +63,16 @@ detects the version is already out and skips.
 
 ## Phase 1 — "Updates" section in the side panel (next release)
 
+**Status: complete — shipped in 0.1.30.** One deliberate deviation from the
+original note: the download extracts **in place over the tree the pipe runs
+from** (atomic write-then-rename per file, wiped-then-rewritten trees,
+path-traversal guard) instead of a separate stable copy — the NMH manifest
+path is unchanged by construction, the next pipe spawn runs the new code,
+and the pipe diffs `package.json` to flag a grown dependency set. The
+in-panel plugin update also refuses source-mounted dev builds (home-patch
+`?src=` rows) with the manual path, since `dsh plugin add` there would
+duplicate the loader entry.
+
 An About/Updates block in the panel's settings area (the panel owns the UI per
 proposal M3 — no DSH packaging risk):
 

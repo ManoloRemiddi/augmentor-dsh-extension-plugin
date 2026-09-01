@@ -21,6 +21,9 @@
 #      augmentor/unsave -> detached
 #   6. M3 housekeeping: with sub-second retention the sweep archives the stale
 #      unattached session (verified via augmentor/state's archived list)
+#   7. 0.1.30 update channel: update-status reports idle; update-plugin
+#      refuses malformed versions before any profile spawn (a live
+#      `dsh plugin add` is never fired — see the leg's comment)
 #
 # Isolation: the test runs under a throwaway DSH_HOME. The user's home patch
 # (`cordis.patch.yml`) is deliberately NOT present, because it already inserts
@@ -265,5 +268,64 @@ printf '%s\n' "$M3_OUT" | grep '^M3PASS' | while IFS= read -r line; do log "${li
 printf '%s\n' "$M3_OUT" | grep -q '^M3 RESULT: ok' \
   && check "M3 chat lifecycle + housekeeping" ok ok \
   || { log "FAIL: M3 lifecycle:"; printf '%s\n' "$M3_OUT"; FAIL=1; }
+
+# 7. 0.1.30 (Phase 1): the plugin-side update channel over the same token-
+# gated WS. Only the SAFE legs are exercised here: update-status must report
+# idle, and update-plugin must refuse malformed versions BEFORE touching any
+# profile. The real `dsh plugin add` spawn is never fired in the boot test
+# (the isolated home's profiles symlink points at the user's REAL profiles —
+# a live spawn would be a real pnpm run in the user's profile directory).
+UPD_OUT=$("$NODE_BIN" - "$BASE" "$PLUGIN_DIR" <<'EOF'
+const [base, pluginDir] = process.argv.slice(2)
+const WebSocket = require(require('path').join(pluginDir, 'node_modules', 'ws'))
+;(async () => {
+  const ws = new WebSocket(`${base.replace(/^http/, 'ws')}/api/augmentor/ws?token=boot-test-token-0123456789abcdef`)
+  await new Promise((res, rej) => { ws.on('open', res); ws.on('error', (e) => rej(e)) })
+  const waiters = new Map()
+  ws.on('message', (d) => {
+    const m = JSON.parse(d.toString())
+    if (m.type === 'reply' && waiters.has(m.id)) { const w = waiters.get(m.id); waiters.delete(m.id); w(m) }
+  })
+  const call = (id, method, params) => new Promise((resolve, reject) => {
+    const to = setTimeout(() => reject(new Error(`${method} timed out`)), 8000)
+    waiters.set(id, (m) => { clearTimeout(to); resolve(m) })
+    ws.send(JSON.stringify({ type: 'request', id, method, params }))
+  })
+  const fail = (name, got) => { console.log(`UPDFAIL: ${name} ${JSON.stringify(got)}`); process.exit(1) }
+  // idle: no update has ever run in this process
+  let r = await call('upd-status-1', 'augmentor/update-status', {})
+  if (r.result?.ok !== true || r.result?.job?.status !== 'idle') fail('update-status idle', r)
+  console.log('UPDPASS: update-status reports idle on a fresh boot')
+  // malformed versions are refused at the version gate, before any
+  // discovery / spawn
+  // plugin-handled rejections ride in result: {ok:false, error} (the reply
+  // frame itself is a success) — assert on result.error, not error.
+  let bi = 0
+  for (const bad of ['abc', '1.2', '', '1.2.3.4']) {
+    bi++
+    r = await call(`upd-bad-${bi}`, 'augmentor/update-plugin', { version: bad })
+    if (r.result?.ok !== false || !r.result?.error?.includes('invalid version')) fail(`update-plugin refuses ${JSON.stringify(bad)}`, r)
+  }
+  console.log('UPDPASS: update-plugin refuses malformed versions (no spawn)')
+  // well-formed version, but this test boots the plugin as a SOURCE MOUNT
+  // (like the dev deployment): the update must refuse with the actionable
+  // message BEFORE discovery — `dsh plugin add` against a source mount
+  // would duplicate the loader entry id and kill the next boot.
+  r = await call('upd-src', 'augmentor/update-plugin', { version: '999.0.0' })
+  if (r.result?.ok !== false || !r.result?.error?.includes('from source')) fail('update-plugin refuses the source mount', r)
+  console.log('UPDPASS: update-plugin refuses source-mounted builds (no duplicate loader entry)')
+  // rejected requests must not have created a job
+  r = await call('upd-status-2', 'augmentor/update-status', {})
+  if (r.result?.ok !== true || r.result?.job?.status !== 'idle') fail('update-status still idle', r)
+  console.log('UPDPASS: rejected update requests leave no job behind')
+  ws.close()
+  console.log('UPD RESULT: ok')
+})().catch((e) => { console.log(`UPD RESULT: error (${e.message})`); process.exit(1) })
+EOF
+)
+printf '%s\n' "$UPD_OUT" | grep '^UPDPASS' | while IFS= read -r line; do log "${line#UPDPASS: }"; done
+printf '%s\n' "$UPD_OUT" | grep -q '^UPD RESULT: ok' \
+  && check "plugin update channel (status + version refusal)" ok ok \
+  || { log "FAIL: update channel:"; printf '%s\n' "$UPD_OUT"; FAIL=1; }
 
 [ "$FAIL" = 0 ] && { log "ALL PASS"; exit 0; } || { log "FAILURES PRESENT"; exit 1; }

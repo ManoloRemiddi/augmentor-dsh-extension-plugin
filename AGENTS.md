@@ -35,7 +35,8 @@ node test/install-proof.mjs                  # deterministic fresh-user install 
 PROOF_LLM=1 node test/install-proof.mjs      # + real agent drives the headless browser (needs LLM creds in env)
 PROOF_SOURCE=npm PROOF_LLM=1 node test/install-proof.mjs   # npm plugin path
 cd test && node m3-e2e.mjs && node sw-e2e.mjs && node panel-e2e.mjs \
-  && node chrome-e2e.mjs && node m2-e2e.mjs && node tools-e2e.mjs   # e2e battery (needs the real local DSH app)
+  && node chrome-e2e.mjs && node m2-e2e.mjs && node tools-e2e.mjs \
+  && node updates-e2e.mjs   # e2e battery (needs the real local DSH app)
 sh plugin/tests/boot/run.sh                  # plugin boot test
 ```
 

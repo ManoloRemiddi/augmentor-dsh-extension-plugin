@@ -44,8 +44,22 @@
  *                  {type: 'request', id, method: 'browser/execute', params}
  *                  {type: 'reply', id, result | error: {message}}
  *   pipe → plugin: {type: 'request', id, method: 'augmentor/save'|'augmentor/unsave'|
- *                                        'augmentor/state', params}
+ *                                        'augmentor/state'|
+ *                                        'augmentor/update-plugin'|
+ *                                        'augmentor/update-status', params}
  *                  {type: 'reply', id, result | error: {message}}
+ *
+ * 0.1.30 (Phase 1) — in-place updates: the panel's Update-plugin button asks
+ * the plugin to run `dsh plugin --profile <name> add dsh-augmentor@<ver>`
+ * (fire-and-poll: the spawn returns immediately, the panel polls
+ * update-status). Profile discovery scans $DSH_HOME/profiles/* for a
+ * dsh-augmentor install and prefers the one whose installed version matches
+ * this running build. The spawn uses a fixed argv array (no shell) and the
+ * version is regex-validated; the reply's output tail is capped (the frame
+ * crosses the plugin WS, not the 1 MiB NMH limit, but stays slim anyway).
+ * Source-mounted dev builds (home-patch `?src=` row, M1 live mount) refuse
+ * with an actionable message instead: running `dsh plugin add` against that
+ * setup would insert a duplicate loader entry id and kill the next boot.
  * browser/execute goes to the ACTIVE pipe only (the most recently connected —
  * S6); its reply must come from that same socket. augmentor/* requests are
  * answered by the plugin itself (no browser involved).
@@ -54,7 +68,8 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { Duplex } from 'node:stream'
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto'
-import { mkdirSync, realpathSync, rmSync, readFileSync, writeFileSync, openSync, writeSync, closeSync } from 'node:fs'
+import { spawn } from 'node:child_process'
+import { mkdirSync, realpathSync, rmSync, readFileSync, writeFileSync, openSync, writeSync, closeSync, readdirSync } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import z from '@deepseek-ai/schemastery'
@@ -204,6 +219,26 @@ function packageVersion(): string {
   }
 }
 const VERSION = packageVersion()
+
+/**
+ * 0.1.30 (Phase 1): is THIS build the dev source mount (home-patch row
+ * `name: '<repo>/plugin/src/index.ts?src=…'`) rather than the npm-installed
+ * bundle? npm/pnpm loads `…/node_modules/dsh-augmentor/dist/index.js` (the
+ * pnpm store path still contains that segment after symlink resolution);
+ * anything else — notably `src/index.ts` — is a source mount, where the
+ * in-panel update must refuse (it would duplicate the loader entry id).
+ */
+function isSourceMounted(): boolean {
+  try {
+    const here = new URL(import.meta.url)
+    here.search = ''
+    const p = here.pathname
+    return p.endsWith(`${path.sep}src${path.sep}index.ts`) || !p.includes(`${path.sep}node_modules${path.sep}dsh-augmentor${path.sep}`)
+  } catch {
+    return false
+  }
+}
+const SOURCE_MOUNTED = isSourceMounted()
 
 /** S9 (audit): constant-time token comparison (digests: equal length, and
  * the result does not reveal where the mismatch occurred). */
@@ -379,6 +414,135 @@ export function apply(ctx: Context, config: Config) {
   /** The existing workspace over the chat dir, if any (resolveByPath is async). */
   const chatWorkspace = () => registry.resolveByPath(chatDir)
 
+  // ------------------------------------------------------ in-place updates
+  // The panel's Update-plugin button (Phase 1, v0.1.30): re-add the plugin to
+  // its DSH profile with a pinned version — `dsh plugin --profile <name> add
+  // dsh-augmentor@<ver>` is the update path (the name is already in the
+  // profile's bundles, so the reconciler upgrades in place). The running app
+  // keeps the OLD code until it restarts; the UI says so. One job at a time;
+  // the panel polls update-status over the same channel.
+  interface UpdateJob {
+    status: 'running' | 'done' | 'error'
+    version: string
+    profile: string | null
+    startedAt: number
+    finishedAt?: number
+    exitCode?: number | null
+    output: string
+  }
+  let updateJob: UpdateJob | null = null
+  const UPDATE_TIMEOUT_MS = 5 * 60 * 1000
+  const UPDATE_OUT_TAIL = 4000
+
+  function dshHome(): string {
+    return process.env.DSH_HOME ?? path.join(os.homedir(), '.dsh')
+  }
+
+  /** Read <dir>/package.json dependencies['dsh-augmentor'] (declared dep). */
+  function readDeclaredDep(dir: string): string | null {
+    try {
+      const pkg = JSON.parse(readFileSync(path.join(dir, 'package.json'), 'utf8'))
+      const dep = pkg?.dependencies?.['dsh-augmentor'] ?? pkg?.devDependencies?.['dsh-augmentor']
+      return typeof dep === 'string' ? dep : null
+    } catch {
+      return null
+    }
+  }
+
+  /** Read the actually-installed version from node_modules (pnpm symlink). */
+  function readInstalledVersion(dir: string): string | null {
+    try {
+      const pkg = JSON.parse(readFileSync(path.join(dir, 'node_modules', 'dsh-augmentor', 'package.json'), 'utf8'))
+      return typeof pkg?.version === 'string' ? pkg.version : null
+    } catch {
+      return null
+    }
+  }
+
+  /**
+   * Which profile drives this session? Scan $DSH_HOME/profiles/* for a
+   * dsh-augmentor install; prefer the candidate whose installed version
+   * equals THIS running build (a multi-profile machine may run several).
+   */
+  function discoverProfile(home: string): { name: string; installed: string | null } | { error: string } {
+    let names: string[] = []
+    try {
+      names = readdirSync(path.join(home, 'profiles'))
+    } catch {
+      return { error: `no profiles directory at ${path.join(home, 'profiles')}` }
+    }
+    const candidates: { name: string; declared: string | null; installed: string | null }[] = []
+    for (const name of names) {
+      if (!/^[a-z0-9][a-z0-9._-]*$/i.test(name)) continue
+      const dir = path.join(home, 'profiles', name)
+      const declared = readDeclaredDep(dir)
+      const installed = readInstalledVersion(dir)
+      if (!declared && !installed) continue
+      candidates.push({ name, declared, installed })
+    }
+    if (!candidates.length) {
+      return { error: `no DSH profile with dsh-augmentor found under ${path.join(home, 'profiles')}` }
+    }
+    const exact = candidates.filter((c) => c.installed === VERSION)
+    const pool = exact.length ? exact : candidates
+    if (pool.length > 1) {
+      return {
+        error: `multiple DSH profiles have dsh-augmentor: ${pool.map((c) => c.name).join(', ')} — update the profile that drives this session manually`,
+      }
+    }
+    return { name: pool[0].name, installed: pool[0].installed }
+  }
+
+  function startPluginUpdate(version: string): UpdateJob {
+    // Source-mounted dev build (home-patch `?src=` row): there is no installed
+    // package to update, and `dsh plugin add` would insert a duplicate loader
+    // entry id that kills the next boot. Refuse with the manual path instead.
+    if (SOURCE_MOUNTED) {
+      throw new Error(
+        'this DSH loads dsh-augmentor from source (a dev mount, not an npm-installed profile package) — the in-panel update only manages installed plugins; pull the new version into your source checkout and bump the ?src= query in the home patch',
+      )
+    }
+    const found = discoverProfile(dshHome())
+    if ('error' in found) throw new Error(found.error)
+    const job: UpdateJob = {
+      status: 'running',
+      version,
+      profile: found.name,
+      startedAt: Date.now(),
+      output: `$ dsh plugin --profile ${found.name} add dsh-augmentor@${version}\n`,
+    }
+    updateJob = job
+    // Fixed argv array, no shell, validated version: the only external input
+    // is the semver the panel already checked against npm.
+    const child = spawn('dsh', ['plugin', '--profile', found.name, 'add', `dsh-augmentor@${version}`], {
+      env: process.env,
+    })
+    const push = (chunk: Buffer) => {
+      job.output = (job.output + chunk.toString('utf8')).slice(-UPDATE_OUT_TAIL)
+    }
+    child.stdout?.on('data', push)
+    child.stderr?.on('data', push)
+    const killer = setTimeout(() => {
+      try { child.kill('SIGTERM') } catch { /* already gone */ }
+    }, UPDATE_TIMEOUT_MS)
+    child.on('error', (e) => {
+      clearTimeout(killer)
+      if (updateJob !== job) return
+      job.status = 'error'
+      job.finishedAt = Date.now()
+      job.exitCode = null
+      push(`\ndsh CLI could not start: ${e.message}\nmanual: dsh plugin --profile ${found.name} add dsh-augmentor@${version}\n`)
+    })
+    child.on('close', (code) => {
+      clearTimeout(killer)
+      if (updateJob !== job) return
+      job.status = code === 0 ? 'done' : 'error'
+      job.finishedAt = Date.now()
+      job.exitCode = code
+    })
+    return job
+  }
+
   /**
    * Answer the extension's lifecycle requests that ride in as pipe frames.
    * The reply goes back to the socket that asked (a broadcast reply let a
@@ -404,6 +568,20 @@ export function apply(ctx: Context, config: Config) {
       } else if (frame.method === 'augmentor/state') {
         const ws = await chatWorkspace()
         reply({ ok: true, saved: [...(ws?.sessionIds ?? [])], archived: [...registry.archivedSessionIds] })
+      } else if (frame.method === 'augmentor/update-plugin') {
+        // Fire-and-poll: the pnpm add runs in the background (a registry
+        // round trip can outlast the channel timeout); the reply carries the
+        // initial job state and the panel polls augmentor/update-status.
+        const version = String(frame.params?.version ?? '')
+        if (!/^\d+\.\d+\.\d+$/.test(version)) throw new Error(`invalid version: ${JSON.stringify(frame.params?.version)}`)
+        if (updateJob?.status === 'running') {
+          reply({ ok: true, started: false, job: { ...updateJob } })
+        } else {
+          const job = startPluginUpdate(version)
+          reply({ ok: true, started: true, job: { ...job } })
+        }
+      } else if (frame.method === 'augmentor/update-status') {
+        reply({ ok: true, job: updateJob ? { ...updateJob } : { status: 'idle' } })
       } else {
         reply({ ok: false, error: `unknown augmentor method: ${frame.method}` })
       }

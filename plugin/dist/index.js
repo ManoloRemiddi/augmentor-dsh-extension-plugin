@@ -1,6 +1,7 @@
 // src/index.ts
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
-import { mkdirSync, realpathSync, rmSync, readFileSync, openSync, writeSync, closeSync } from "node:fs";
+import { spawn } from "node:child_process";
+import { mkdirSync, realpathSync, rmSync, readFileSync, openSync, writeSync, closeSync, readdirSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import z from "@deepseek-ai/schemastery";
@@ -151,6 +152,17 @@ function packageVersion() {
   }
 }
 var VERSION = packageVersion();
+function isSourceMounted() {
+  try {
+    const here = new URL(import.meta.url);
+    here.search = "";
+    const p = here.pathname;
+    return p.endsWith(`${path.sep}src${path.sep}index.ts`) || !p.includes(`${path.sep}node_modules${path.sep}dsh-augmentor${path.sep}`);
+  } catch {
+    return false;
+  }
+}
+var SOURCE_MOUNTED = isSourceMounted();
 function tokenEquals(presented, expected) {
   if (presented == null || presented === "") return false;
   const a = createHash("sha256").update(presented).digest();
@@ -191,6 +203,108 @@ function apply(ctx, config) {
   const persistence = ctx.get("sessionPersistence");
   const ensureWorkspace = () => registry.create(chatDir, config.workspaceTitle);
   const chatWorkspace = () => registry.resolveByPath(chatDir);
+  let updateJob = null;
+  const UPDATE_TIMEOUT_MS = 5 * 60 * 1e3;
+  const UPDATE_OUT_TAIL = 4e3;
+  function dshHome() {
+    return process.env.DSH_HOME ?? path.join(os.homedir(), ".dsh");
+  }
+  function readDeclaredDep(dir) {
+    try {
+      const pkg = JSON.parse(readFileSync(path.join(dir, "package.json"), "utf8"));
+      const dep = pkg?.dependencies?.["dsh-augmentor"] ?? pkg?.devDependencies?.["dsh-augmentor"];
+      return typeof dep === "string" ? dep : null;
+    } catch {
+      return null;
+    }
+  }
+  function readInstalledVersion(dir) {
+    try {
+      const pkg = JSON.parse(readFileSync(path.join(dir, "node_modules", "dsh-augmentor", "package.json"), "utf8"));
+      return typeof pkg?.version === "string" ? pkg.version : null;
+    } catch {
+      return null;
+    }
+  }
+  function discoverProfile(home) {
+    let names = [];
+    try {
+      names = readdirSync(path.join(home, "profiles"));
+    } catch {
+      return { error: `no profiles directory at ${path.join(home, "profiles")}` };
+    }
+    const candidates = [];
+    for (const name2 of names) {
+      if (!/^[a-z0-9][a-z0-9._-]*$/i.test(name2)) continue;
+      const dir = path.join(home, "profiles", name2);
+      const declared = readDeclaredDep(dir);
+      const installed = readInstalledVersion(dir);
+      if (!declared && !installed) continue;
+      candidates.push({ name: name2, declared, installed });
+    }
+    if (!candidates.length) {
+      return { error: `no DSH profile with dsh-augmentor found under ${path.join(home, "profiles")}` };
+    }
+    const exact = candidates.filter((c) => c.installed === VERSION);
+    const pool = exact.length ? exact : candidates;
+    if (pool.length > 1) {
+      return {
+        error: `multiple DSH profiles have dsh-augmentor: ${pool.map((c) => c.name).join(", ")} \u2014 update the profile that drives this session manually`
+      };
+    }
+    return { name: pool[0].name, installed: pool[0].installed };
+  }
+  function startPluginUpdate(version) {
+    if (SOURCE_MOUNTED) {
+      throw new Error(
+        "this DSH loads dsh-augmentor from source (a dev mount, not an npm-installed profile package) \u2014 the in-panel update only manages installed plugins; pull the new version into your source checkout and bump the ?src= query in the home patch"
+      );
+    }
+    const found = discoverProfile(dshHome());
+    if ("error" in found) throw new Error(found.error);
+    const job = {
+      status: "running",
+      version,
+      profile: found.name,
+      startedAt: Date.now(),
+      output: `$ dsh plugin --profile ${found.name} add dsh-augmentor@${version}
+`
+    };
+    updateJob = job;
+    const child = spawn("dsh", ["plugin", "--profile", found.name, "add", `dsh-augmentor@${version}`], {
+      env: process.env
+    });
+    const push = (chunk) => {
+      job.output = (job.output + chunk.toString("utf8")).slice(-UPDATE_OUT_TAIL);
+    };
+    child.stdout?.on("data", push);
+    child.stderr?.on("data", push);
+    const killer = setTimeout(() => {
+      try {
+        child.kill("SIGTERM");
+      } catch {
+      }
+    }, UPDATE_TIMEOUT_MS);
+    child.on("error", (e) => {
+      clearTimeout(killer);
+      if (updateJob !== job) return;
+      job.status = "error";
+      job.finishedAt = Date.now();
+      job.exitCode = null;
+      push(`
+dsh CLI could not start: ${e.message}
+manual: dsh plugin --profile ${found.name} add dsh-augmentor@${version}
+`);
+    });
+    child.on("close", (code) => {
+      clearTimeout(killer);
+      if (updateJob !== job) return;
+      job.status = code === 0 ? "done" : "error";
+      job.finishedAt = Date.now();
+      job.exitCode = code;
+    });
+    return job;
+  }
   async function handlePipeRequest(source, frame) {
     const id = frame.id;
     const reply = (out) => {
@@ -211,6 +325,17 @@ function apply(ctx, config) {
       } else if (frame.method === "augmentor/state") {
         const ws = await chatWorkspace();
         reply({ ok: true, saved: [...ws?.sessionIds ?? []], archived: [...registry.archivedSessionIds] });
+      } else if (frame.method === "augmentor/update-plugin") {
+        const version = String(frame.params?.version ?? "");
+        if (!/^\d+\.\d+\.\d+$/.test(version)) throw new Error(`invalid version: ${JSON.stringify(frame.params?.version)}`);
+        if (updateJob?.status === "running") {
+          reply({ ok: true, started: false, job: { ...updateJob } });
+        } else {
+          const job = startPluginUpdate(version);
+          reply({ ok: true, started: true, job: { ...job } });
+        }
+      } else if (frame.method === "augmentor/update-status") {
+        reply({ ok: true, job: updateJob ? { ...updateJob } : { status: "idle" } });
       } else {
         reply({ ok: false, error: `unknown augmentor method: ${frame.method}` });
       }

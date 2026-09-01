@@ -442,6 +442,77 @@ export function handlePanelMessage(msg, sender, sendResponse) {
     })
     return true // async
   }
+  // ── 0.1.30 (Phase 1): the Updates popover ─────────────────────────────────
+  // The panel owns the UI; the work splits pipe-side (updates/check,
+  // updates/download — registry + GitHub + in-place extraction) and
+  // plugin-side (augmentor/update-plugin + /update-status — the profile's
+  // `dsh plugin add` spawn, fire-and-poll). The SW is a thin relay: it adds
+  // the LOADED extension version (chrome.runtime manifest — the one actually
+  // running in the browser, which can lag the files on disk after a
+  // download) and nothing else.
+  if (msg?.type === 'updates/check') {
+    requireReady().then((ok) => {
+      if (!ok) {
+        sendResponse({ ok: false, error: state.error ?? `not ready (phase: ${state.phase})` })
+        return
+      }
+      request('updates/check', { extension: chrome.runtime.getManifest().version })
+        .then((res) => sendResponse({ ok: true, value: res ?? null }))
+        .catch((e) => sendResponse({ ok: false, error: e.message }))
+    })
+    return true // async
+  }
+  if (msg?.type === 'updates/plugin') {
+    // Fire-and-poll start: returns the initial job state immediately.
+    requireReady().then((ok) => {
+      if (!ok) {
+        sendResponse({ ok: false, error: state.error ?? `not ready (phase: ${state.phase})` })
+        return
+      }
+      const version = String(msg.version ?? '')
+      if (!/^\d+\.\d+\.\d+$/.test(version)) {
+        sendResponse({ ok: false, error: `invalid version: ${JSON.stringify(msg.version)}` })
+        return
+      }
+      request('augmentor/update-plugin', { version })
+        .then((res) => sendResponse({ ok: true, value: res ?? null }))
+        .catch((e) => sendResponse({ ok: false, error: e.message }))
+    })
+    return true // async
+  }
+  if (msg?.type === 'updates/plugin-status') {
+    requireReady().then((ok) => {
+      if (!ok) {
+        sendResponse({ ok: false, error: state.error ?? `not ready (phase: ${state.phase})` })
+        return
+      }
+      request('augmentor/update-status', {})
+        .then((res) => sendResponse({ ok: true, value: res ?? null }))
+        .catch((e) => sendResponse({ ok: false, error: e.message }))
+    })
+    return true // async
+  }
+  if (msg?.type === 'updates/download') {
+    // The pipe re-validates both the version and the exact canonical asset
+    // URL (the panel may render hostile session content — the URL policy
+    // stays pipe-side); this relay only checks the pair is present.
+    requireReady().then((ok) => {
+      if (!ok) {
+        sendResponse({ ok: false, error: state.error ?? `not ready (phase: ${state.phase})` })
+        return
+      }
+      const version = String(msg.version ?? '')
+      const url = String(msg.url ?? '')
+      if (!/^\d+\.\d+\.\d+$/.test(version) || !url.startsWith('https://github.com/')) {
+        sendResponse({ ok: false, error: 'invalid update target' })
+        return
+      }
+      request('updates/download', { version, url })
+        .then((res) => sendResponse({ ok: true, value: res ?? null }))
+        .catch((e) => sendResponse({ ok: false, error: e.message }))
+    })
+    return true // async
+  }
   if (msg?.type === 'fence/probe') {
     // M1 evidence (C1): fetch from THIS origin (chrome-extension://…) — the
     // trust fence judges the request by Origin + sec-fetch-site metadata, so

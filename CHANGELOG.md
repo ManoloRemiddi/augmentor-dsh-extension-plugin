@@ -11,6 +11,71 @@ All notable changes to Augmentor (the `dsh-augmentor` plugin + the Chromium
 extension). Versions are locked across `plugin/package.json` and
 `extension/manifest.json`.
 
+## 0.1.30 — 2026-09-01
+
+### Added
+
+- **In-place updates — the "Updates" section of the side panel.** A download
+  icon in the header opens the update popover:
+  - **Version table** — installed vs latest for every component: the plugin
+    (`dsh-augmentor`, latest from the npm registry, installed from the
+    running DSH app's handshake), and pipe + extension (one release artifact;
+    latest from GitHub Releases, extension version as the browser has it
+    loaded). Each source degrades independently — a dead npm/GitHub/app shows
+    as a warning strip, never as a broken check.
+  - **Update** (plugin) — the plugin inside the running DSH app runs
+    `dsh plugin add dsh-augmentor@<ver>` in the profile that drives this
+    session (discovered from `$DSH_HOME/profiles`, the candidate whose
+    installed version matches the running build). The spawn uses a fixed
+    argv (no shell), a regex-validated version, a 5-minute cap, and a
+    capped output tail; the button fires and the panel polls the job every
+    2 s (the pnpm run outlives any single round trip). A finished update
+    tells you to restart the DSH session to load the new plugin.
+  - **Download** (pipe + extension) — the pipe fetches the canonical release
+    zip (`releases/download/v<ver>/augmentor-<ver>-dist.zip` — the URL is
+    allowlisted in the pipe, never fetched from the panel side) and extracts
+    it over its own tree: ≤15 MB, atomic write-then-rename per file,
+    path-traversal guard, wiped-then-rewritten trees so removed files don't
+    linger. A finished download tells you to reload Augmentor in
+    chrome://extensions — the next pipe spawn runs the new code.
+  - **Skew warning** — releases ship plugin/pipe/extension in lockstep; a
+    mismatch means the pending restart or reload has not happened yet, and
+    the popover says which step is missing (including "new files on disk —
+    reload to activate" between a download and the reload).
+  - Source-mounted dev builds (the home-patch `?src=` row) refuse the
+    in-panel plugin update with the manual path instead of running
+    `dsh plugin add` against a setup where it would duplicate the loader
+    entry and kill the next boot.
+- **Release workflow** (`release.yml`, shipped in the 0.1.29 tree) — a
+  pushed `v*` tag now cuts the release end to end: pack the dist zip,
+  publish `dsh-augmentor` to npm, run the npm install-proof, and open the
+  GitHub release with the asset. **From this tag on, releasing is
+  `git tag v0.1.31 && git push origin master v0.1.31`.**
+- **Pipe dependency: `fflate`** (zip extraction for Download). In-place
+  downloads of future releases carry the new dependency set — the pipe
+  detects an added dependency and tells you to run `pnpm install`.
+
+### Tests
+
+- `test/updates-e2e.mjs` (new) — live `updates/check` against the real DSH
+  app (npm + GitHub + handshake, all three green), the download allowlist
+  (non-canonical URL, malformed version, cross-version URL — refused before
+  any fetch), and a full in-place download of the real release asset into a
+  scratch copy: every archive entry byte-identical on disk and the next
+  pipe spawn booting the new version.
+- `plugin/tests/boot/run.sh` leg 7 — the plugin's update channel over the
+  token-gated WS: `update-status` idle on a fresh boot, malformed versions
+  refused before any discovery/spawn, source-mounted builds refused with
+  the actionable message, and no job left behind by rejected requests.
+
+### Notes
+
+- **First update with the mechanism** — 0.1.30 ships the update UI, so the
+  running 0.1.29 pipe cannot offer it to you yet: this one is manual
+  (re-clone + `pnpm install`, or `dsh plugin add dsh-augmentor@0.1.30`,
+  then reload the extension). From 0.1.30 forward, updates happen in the
+  panel.
+
 ## 0.1.29 — 2026-09-01
 
 ### Added

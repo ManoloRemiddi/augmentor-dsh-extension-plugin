@@ -437,6 +437,257 @@ async function loadSessionsList() {
   }
 }
 
+// ── Updates popover (0.1.30, Phase 1) ──────────────────────────────────────
+// In-place updates. The pipe answers updates/check (npm latest + GitHub
+// latest release + the live plugin handshake → installed-vs-latest per
+// component, each source degrading independently). Two actions:
+//   Update   → the plugin runs `dsh plugin add dsh-augmentor@<ver>` in the
+//              DSH profile (fire-and-poll; restarting the DSH session loads
+//              the new code);
+//   Download → the pipe fetches the canonical release zip and extracts it
+//              over its own tree (reload in chrome://extensions activates
+//              the new extension; the next pipe spawn runs the new pipe).
+const updatesBtn = document.getElementById('updates')
+const updatesPop = document.getElementById('updatespop')
+const updatesPopBody = document.getElementById('updatespop-body')
+const updatesStatus = document.getElementById('updates-status')
+const updatesCheckBtn = document.getElementById('updates-check')
+
+let updatesInfo = null // last updates/check value
+let updatesPoll = null // plugin-update status poll timer
+let updatesBusy = false // a check/update/download is in flight
+
+function vcmp(a, b) {
+  const pa = String(a).split('.').map(Number)
+  const pb = String(b).split('.').map(Number)
+  for (let i = 0; i < 3; i++) {
+    const d = (pa[i] || 0) - (pb[i] || 0)
+    if (d !== 0) return d
+  }
+  return 0
+}
+const v = (x) => (typeof x === 'string' && x ? `v${x}` : '—')
+
+function updatesSetStatus(text, cls) {
+  updatesStatus.textContent = text ?? ''
+  updatesStatus.className = cls ?? ''
+}
+
+function upStrip(text, cls = '') {
+  const d = document.createElement('div')
+  d.className = 'up-strip' + (cls ? ` ${cls}` : '')
+  d.textContent = text
+  updatesPopBody.appendChild(d)
+  return d
+}
+
+function renderUpdates() {
+  updatesPopBody.replaceChildren()
+  if (!updatesInfo) {
+    upStrip('Checking installed vs latest…')
+    return
+  }
+  const { installed, latest, errors } = updatesInfo
+  // Row 1 — the plugin (npm, lives in the DSH profile).
+  const pluginStale = installed.plugin && latest.plugin && vcmp(installed.plugin, latest.plugin) < 0
+  const r1 = document.createElement('div')
+  r1.className = 'up-row'
+  const m1 = document.createElement('div')
+  m1.className = 'up-main'
+  const n1 = document.createElement('span')
+  n1.className = 'up-name'
+  n1.textContent = 'Plugin (dsh-augmentor)'
+  const s1 = document.createElement('span')
+  s1.className = 'up-versions' + (pluginStale ? ' stale' : installed.plugin && latest.plugin ? ' fresh' : '')
+  s1.textContent = installed.plugin
+    ? pluginStale
+      ? `${v(installed.plugin)} → ${v(latest.plugin)} available`
+      : `${v(installed.plugin)} — up to date`
+    : 'unknown (plugin handshake unreachable)'
+  m1.append(n1, s1)
+  r1.appendChild(m1)
+  if (pluginStale) {
+    const b = document.createElement('button')
+    b.type = 'button'
+    b.className = 'up-btn primary'
+    b.textContent = 'Update'
+    b.disabled = updatesBusy
+    b.addEventListener('click', () => startPluginUpdate())
+    r1.appendChild(b)
+  }
+  updatesPopBody.appendChild(r1)
+  // Row 2 — pipe + extension (one release artifact).
+  const extStale = installed.extension && latest.extension && vcmp(installed.extension, latest.extension) < 0
+  // After a download but before the reload, the files on disk are newer than
+  // the version the browser has loaded — say so instead of re-offering it.
+  const diskAhead = installed.pipeDisk && installed.extension && vcmp(installed.pipeDisk, installed.extension) > 0
+  const r2 = document.createElement('div')
+  r2.className = 'up-row'
+  const m2 = document.createElement('div')
+  m2.className = 'up-main'
+  const n2 = document.createElement('span')
+  n2.className = 'up-name'
+  n2.textContent = 'Pipe + Extension'
+  const s2 = document.createElement('span')
+  s2.className = 'up-versions' + (extStale ? ' stale' : installed.extension && latest.extension ? ' fresh' : '')
+  s2.textContent = installed.extension
+    ? extStale
+      ? `${v(installed.extension)} → ${v(latest.extension)} available`
+      : diskAhead
+        ? `${v(installed.extension)} (new files on disk — reload to activate)`
+        : `${v(installed.extension)} — up to date`
+    : 'unknown'
+  m2.append(n2, s2)
+  r2.appendChild(m2)
+  if (extStale && latest.extAssetUrl) {
+    const b = document.createElement('button')
+    b.type = 'button'
+    b.className = 'up-btn primary'
+    b.textContent = 'Download'
+    b.disabled = updatesBusy
+    b.addEventListener('click', () => startDownload())
+    r2.appendChild(b)
+  }
+  updatesPopBody.appendChild(r2)
+  // Skew: releases ship all three in lockstep — a mismatch means one of the
+  // update steps (restart / reload) has not happened yet.
+  if (installed.plugin && installed.extension && installed.plugin !== installed.extension) {
+    upStrip(
+      `Version skew: plugin ${v(installed.plugin)} / extension ${v(installed.extension)} — releases ship in lockstep; finish the pending restart or reload.`,
+      'warn',
+    )
+  }
+  // Per-source check failures (each source degrades independently).
+  const failed = []
+  if (errors.npm) failed.push(`npm: ${errors.npm}`)
+  if (errors.releases) failed.push(`releases: ${errors.releases}`)
+  if (failed.length) upStrip('Check partially failed — ' + failed.join(' · '), 'warn')
+  if (errors.plugin) upStrip(errors.plugin, 'warn')
+}
+
+async function doCheck() {
+  if (updatesBusy) return false
+  updatesBusy = true
+  updatesCheckBtn.disabled = true
+  updatesSetStatus('Checking npm + GitHub…')
+  try {
+    const res = await send('updates/check')
+    if (!res?.ok) throw new Error(res?.error ?? 'check failed')
+    updatesInfo = res.value
+    renderUpdates()
+    updatesSetStatus('')
+    return true
+  } catch (e) {
+    updatesSetStatus(e.message, 'err')
+    return false
+  } finally {
+    updatesBusy = false
+    updatesCheckBtn.disabled = false
+  }
+}
+
+async function startPluginUpdate() {
+  if (updatesBusy || !updatesInfo?.latest?.plugin) return
+  const version = updatesInfo.latest.plugin
+  const from = updatesInfo.installed.plugin
+  const text = `Update the DSH plugin (dsh-augmentor)${from ? ` ${v(from)} → ` : ''}${v(version)}?\n\nThis runs "dsh plugin add" in your DSH profile. When it finishes, restart the DSH session to load the new version.`
+  if (!confirm(text)) return
+  updatesBusy = true
+  renderUpdates() // disables the row buttons
+  updatesSetStatus(`Updating plugin to ${v(version)}…`)
+  try {
+    const res = await send('updates/plugin', { version })
+    if (!res?.ok) throw new Error(res?.error ?? 'update failed to start')
+    // Plugin-side rejections ride in the payload ({ok:false,error}) — the
+    // relay round trip itself succeeded.
+    const inner = res.value ?? {}
+    if (inner.ok === false) throw new Error(inner.error ?? 'update failed to start')
+    pollPluginUpdate()
+  } catch (e) {
+    updatesBusy = false
+    updatesSetStatus(e.message, 'err')
+    renderUpdates()
+  }
+}
+
+// The pnpm add outlives any single round trip, so the panel polls the job
+// state every 2 s (the pipe keeps the SW alive via the open port).
+function pollPluginUpdate() {
+  if (updatesPoll) clearInterval(updatesPoll)
+  updatesPoll = setInterval(async () => {
+    let res
+    try {
+      res = await send('updates/plugin-status')
+    } catch {
+      return // SW hiccup: the job keeps running; retry next tick
+    }
+    if (!res?.ok) return
+    const job = res.value?.job ?? { status: 'idle' }
+    if (job.status === 'running') {
+      const tail = (job.output || '').trim().split('\n').pop() || 'working…'
+      updatesSetStatus(`Updating plugin (${job.profile ?? 'profile'}) — ${tail.slice(0, 90)}`)
+      return
+    }
+    clearInterval(updatesPoll)
+    updatesPoll = null
+    updatesBusy = false
+    if (job.status === 'done') {
+      updatesSetStatus(`Plugin updated to ${v(job.version)} — restart the DSH session to load it.`, 'ok')
+    } else if (job.status === 'error') {
+      const tail = (job.output || '').trim().split('\n').pop() || `exit code ${job.exitCode ?? 'unknown'}`
+      updatesSetStatus(`Plugin update failed — ${tail.slice(0, 160)}`, 'err')
+    } else {
+      // 'idle': the job is gone (e.g. the DSH app restarted mid-update).
+      updatesSetStatus('No plugin update in flight (no job) — check the plugin version and retry.', 'warn')
+    }
+    renderUpdates()
+  }, 2000)
+}
+
+async function startDownload() {
+  if (updatesBusy) return
+  const { latest } = updatesInfo
+  if (!latest?.extension || !latest?.extAssetUrl) return
+  const version = latest.extension
+  const text = `Download and install pipe + extension ${v(version)} in place?\n\nThe release artifact is extracted over this install. After it finishes: reload Augmentor in chrome://extensions (the next pipe start runs the new code). This part does not touch your DSH sessions.`
+  if (!confirm(text)) return
+  updatesBusy = true
+  renderUpdates()
+  updatesSetStatus(`Downloading ${v(version)} from GitHub…`)
+  let warnings = []
+  try {
+    const res = await send('updates/download', { version, url: latest.extAssetUrl })
+    if (!res?.ok) throw new Error(res?.error ?? 'download failed')
+    const val = res.value ?? {}
+    if (!val.ok) throw new Error((val.warnings ?? []).join(' — ') || `download failed (${val.failures?.length ?? 0} file(s))`)
+    warnings = val.warnings ?? []
+    // Re-check so the rows reflect the new files (the running pipe still
+    // reports its boot-time version until the next spawn).
+    await doCheck()
+    const note = warnings.length ? `\n${warnings.join('\n')}` : ''
+    updatesSetStatus(`Files updated to ${v(version)} (${val.files} written) — reload Augmentor in chrome://extensions to activate.${note}`, warnings.length ? 'warn' : 'ok')
+  } catch (e) {
+    updatesSetStatus(e.message, 'err')
+  } finally {
+    updatesBusy = false
+    updatesCheckBtn.disabled = false
+  }
+}
+
+// F10: the popover() factory owns the toggle / outside-click / Escape
+// lifecycle; opening triggers the first check (the rows render synchronously,
+// so the factory's measurement sees the real height).
+popover({
+  btn: updatesBtn,
+  el: updatesPop,
+  align: 'left',
+  onOpen: () => {
+    renderUpdates()
+    if (!updatesInfo) void doCheck()
+  },
+})
+updatesCheckBtn.addEventListener('click', () => void doCheck())
+
 // Keep the footer's Send/Stop pair in lock-step with the run state: Stop shows
 // only while a turn is active; Send returns the moment the agent goes idle.
 // The SW (via session.status) and the 2 s poll both funnel through setState.

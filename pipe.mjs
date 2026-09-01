@@ -42,13 +42,17 @@
  *   augmentor/switchModel error (per-session model switching lands in M3 via
  *                         session.selectModel)
  *   trace/fence-probe     writes trace/fence-probe.json (ext-Origin fence evidence)
+ *   updates/check         npm latest + GitHub latest release + live plugin
+ *                         handshake → installed-vs-latest per component
+ *   updates/download      fetch the canonical release zip (strict URL
+ *                         allowlist) and extract it in place over this tree
  *   shutdown              {ok:true}, then clean exit
  * Everything else passes through verbatim to POST /api/<method>, with one
  * exception: session.history responses are shaped (shapeHistory) —
  * assistant/chunk stripped and oldest events dropped until the frame fits
  * under the 1 MiB native-messaging wire limit. See the function comment.
  */
-import { readFileSync, writeFileSync, openSync, writeSync, closeSync } from 'node:fs'
+import { readFileSync, writeFileSync, openSync, writeSync, closeSync, mkdirSync, renameSync, rmSync } from 'node:fs'
 import { readFile, mkdir, chmod } from 'node:fs/promises'
 import path from 'node:path'
 import os from 'node:os'
@@ -59,6 +63,11 @@ import WebSocket from 'ws'
 // the plugin and the extension service worker (wire.mjs; the extension ships
 // a byte-identical copy, asserted by sw-e2e).
 import { decode as wireDecode, encode as wireEncode, Pending } from './wire.mjs'
+// 0.1.30 (Phase 1): in-place update support — unzipSync backs
+// updates/download (the pipe fetches the release zip and extracts it over
+// its own tree; Node has no built-in zip reader, and shelling out to
+// unzip/python3 is too fragile for a release artifact path).
+import { unzipSync } from 'fflate'
 
 const AUGMENTOR_DIR = path.dirname(fileURLToPath(import.meta.url))
 
@@ -77,6 +86,10 @@ const VERSION = manifestVersion()
 const TRACE_DIR = path.join(AUGMENTOR_DIR, 'trace')
 const DSH_BASE = (process.env.DSH_AUGMENTOR_URL ?? 'http://127.0.0.1:3080').replace(/\/+$/, '')
 const PLUGIN_WS_PATH = '/api/augmentor/ws'
+// 0.1.30 (Phase 1): the public GitHub repo that publishes the release
+// assets the in-place update fetches (same identity install-native-host.sh
+// clones from; the workflow's gh-release step names it in CI).
+const RELEASE_REPO = 'ManoloRemiddi/augmentor-dsh-extension-plugin'
 
 // Action-channel token (drives the user's browser, so it is gated). Same
 // resolution as the plugin: explicit env > $DSH_HOME/augmentor-ws-token
@@ -525,7 +538,132 @@ function scheduleReconnect(open, key) {
 }
 
 // ------------------------------------------------------------ local methods
+// 0.1.30 (Phase 1) ---------------------------------------------------------
+// In-place update plumbing. Division of labor: the PIPE owns
+// updates/check (npm registry + GitHub releases + the live plugin handshake)
+// and updates/download (fetch the canonical release zip, extract it over its
+// own tree). The PLUGIN owns augmentor/update-plugin (the profile-side
+// `dsh plugin add` spawn, served over the token-gated WS channel). The
+// extension owns the UI (sidepanel.js Updates popover) and tells the pipe
+// which extension version the browser has actually loaded.
+async function fetchJson(url, timeoutMs) {
+  const res = await fetch(url, {
+    signal: AbortSignal.timeout(timeoutMs),
+    headers: { accept: 'application/json', 'user-agent': 'dsh-augmentor-update-check' },
+  })
+  if (!res.ok) throw new Error(`${new URL(url).host} answered http ${res.status}`)
+  return res.json()
+}
+
 const localMethods = {
+  // Check npm (plugin) + GitHub releases (pipe/extension artifact) + the
+  // live plugin handshake (installed plugin version) in parallel; each
+  // source degrades to an `errors` entry instead of failing the whole check.
+  // The response stays slim — it crosses the 1 MiB native-messaging frame.
+  async 'updates/check'(params) {
+    const extLoaded = typeof params?.extension === 'string' && params.extension ? params.extension : null
+    const [npm, gh, handshake] = await Promise.all([
+      fetchJson('https://registry.npmjs.org/dsh-augmentor/latest', 8000).catch((e) => ({ error: e.message })),
+      fetchJson(`https://api.github.com/repos/${RELEASE_REPO}/releases/latest`, 8000).catch((e) => ({ error: e.message })),
+      // The plugin's handshake carries its installed version (it reads its
+      // own package.json at boot). Tolerate the app/plugin being down.
+      fetch(`${DSH_BASE}/api/augmentor`, { signal: AbortSignal.timeout(3000) })
+        .then((r) => (r.ok ? r.json() : null))
+        .catch(() => null),
+    ])
+    const pluginLatest = !npm.error && typeof npm.version === 'string' ? npm.version : null
+    const extLatest = !gh.error && typeof gh.tag_name === 'string' ? gh.tag_name.replace(/^v/, '') : null
+    const extAssetUrl = extLatest
+      ? (gh.assets ?? []).find((a) => a.name === `augmentor-${extLatest}-dist.zip`)?.browser_download_url ?? null
+      : null
+    return {
+      installed: {
+        plugin: typeof handshake?.version === 'string' ? handshake.version : null,
+        pipe: VERSION, // the code THIS process is running
+        pipeDisk: manifestVersion(), // re-read: may already be newer after a download
+        extension: extLoaded, // chrome.runtime.getManifest().version, as loaded
+      },
+      latest: { plugin: pluginLatest, extension: extLatest, extAssetUrl },
+      errors: {
+        npm: npm.error ?? null,
+        releases: gh.error ?? null,
+        plugin: handshake ? null : 'plugin handshake unreachable (DSH app or dsh-augmentor plugin down)',
+      },
+      checkedAt: new Date().toISOString(),
+    }
+  },
+  // Fetch the canonical release zip for `version` and extract it over the
+  // pipe's own tree (dirname of pipe.mjs). The browser reloads the unpacked
+  // extension from chrome://extensions; the NEXT pipe spawn (which the
+  // extension triggers on port reconnect) picks up the new pipe.mjs.
+  async 'updates/download'(params) {
+    const version = typeof params?.version === 'string' ? params.version : ''
+    if (!/^\d+\.\d+\.\d+$/.test(version)) throw new Error(`invalid version: ${JSON.stringify(params?.version)}`)
+    const url = typeof params?.url === 'string' ? params.url : ''
+    // Strict allowlist: the pipe never fetches an arbitrary URL — the panel
+    // renders hostile session content, so this stays pipe-side policy:
+    // exactly the canonical asset of exactly the requested version.
+    const expected = `https://github.com/${RELEASE_REPO}/releases/download/v${version}/augmentor-${version}-dist.zip`
+    if (url !== expected) throw new Error('refusing to fetch: url is not the canonical release asset for this version')
+    const res = await fetch(url, { signal: AbortSignal.timeout(60000) })
+    if (!res.ok) throw new Error(`download failed: http ${res.status}`)
+    const bytes = new Uint8Array(await res.arrayBuffer())
+    if (bytes.byteLength > 15 * 1024 * 1024) throw new Error('download too large (> 15 MB) — aborting')
+    const files = unzipSync(bytes)
+    const prefix = `augmentor-${version}/`
+    // The allowlist build puts everything under one top directory; node
+    // modules are never shipped (the pack script's staged-tree guard).
+    const rel = Object.keys(files)
+      .filter((k) => k.startsWith(prefix) && !k.endsWith('/'))
+      .map((k) => k.slice(prefix.length))
+      .filter((r) => !r.startsWith('node_modules/') && !r.startsWith('plugin/node_modules/'))
+    if (!rel.length) throw new Error(`archive layout unexpected (no files under ${prefix})`)
+    // Path-traversal guard (defensive — the allowlist build cannot emit
+    // these, but the extraction target is the user's checkout).
+    for (const r of rel) {
+      if (r.split('/').includes('..') || path.isAbsolute(r)) throw new Error(`refusing unsafe archive entry: ${r}`)
+    }
+    const oldPkg = (() => {
+      try { return JSON.parse(readFileSync(path.join(AUGMENTOR_DIR, 'package.json'), 'utf8')) } catch { return {} }
+    })()
+    // Wipe the trees the archive replaces wholesale, so files removed
+    // upstream don't linger. plugin/node_modules is deliberately untouched
+    // (it is not in the archive).
+    for (const dir of ['extension', 'presets', path.join('plugin', 'dist')]) {
+      if (rel.some((r) => r === dir || r.startsWith(dir + '/'))) rmSync(path.join(AUGMENTOR_DIR, dir), { recursive: true, force: true })
+    }
+    let newPkg = null
+    const failures = []
+    let count = 0
+    for (const r of rel) {
+      const target = path.join(AUGMENTOR_DIR, r)
+      try {
+        const data = files[prefix + r]
+        if (r === 'package.json') {
+          try { newPkg = JSON.parse(Buffer.from(data).toString('utf8')) } catch { /* unparseable new pkg: skip the dep diff */ }
+        }
+        mkdirSync(path.dirname(target), { recursive: true })
+        // write-then-rename: atomic on POSIX, and avoids "file in use"
+        // rewrites of the running pipe.mjs where rename is the only
+        // safe primitive (best effort on Windows — failures are reported).
+        const tmp = `${target}.tmp-${process.pid}-${count}`
+        writeFileSync(tmp, data)
+        renameSync(tmp, target)
+        count++
+      } catch (e) {
+        failures.push(`${r}: ${e.message}`)
+      }
+    }
+    const warnings = []
+    // A release that adds a pipe dependency would 500 on the next boot
+    // without a local install — detect it instead of guessing.
+    const oldDeps = Object.keys(oldPkg.dependencies ?? {})
+    const added = Object.keys(newPkg?.dependencies ?? {}).filter((d) => !oldDeps.includes(d))
+    if (added.length) warnings.push(`new dependencies added (${added.join(', ')}): run "pnpm install" in ${AUGMENTOR_DIR} before restarting`)
+    if (failures.length) warnings.push(`${failures.length} file(s) could not be written: ${failures.slice(0, 3).join(' | ')}${failures.length > 3 ? ' …' : ''}`)
+    log(`in-place update to ${version}: ${count} file(s) written, ${failures.length} failure(s)`)
+    return { ok: failures.length === 0, version, files: count, failures, warnings }
+  },
   async 'augmentor/models'() {
     const [models, describe] = await Promise.all([dsh('llm.models', {}), dsh('host.describe', {})])
     return {
@@ -688,7 +826,12 @@ async function handleExtMessage(msg) {
   // M3: the chat-lifecycle methods are served by the PLUGIN over the action
   // channel WS (it holds the workspaceRegistry), not by the /api surface —
   // forward them there and await the plugin's reply frame.
-  const PLUGIN_METHODS = new Set(['augmentor/save', 'augmentor/unsave', 'augmentor/state'])
+  // 0.1.30 (Phase 1): update-plugin/update-status ride the same token-gated
+  // plugin channel — the plugin owns the profile-side `dsh plugin add` spawn.
+  const PLUGIN_METHODS = new Set([
+    'augmentor/save', 'augmentor/unsave', 'augmentor/state',
+    'augmentor/update-plugin', 'augmentor/update-status',
+  ])
   try {
     let value
     if (PLUGIN_METHODS.has(msg.method)) {
