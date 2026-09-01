@@ -54,7 +54,7 @@ jobs:
     env:
       TAG: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag || github.ref_name }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Resolve version from tag
         run: |
@@ -69,7 +69,7 @@ jobs:
           echo "VER=$VER" >> "$GITHUB_ENV"
           echo "dist/augmentor-$VER-dist.zip"
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 24
 
