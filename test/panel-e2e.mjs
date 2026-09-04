@@ -14,9 +14,12 @@
 // pipe; SW<->panel messages bridged; one shared storage.local Map).
 // Flow: wait for the SW's auto-connect (top-level ensurePort; no button) ->
 // wait 'connected' -> click #sessions -> click Probe (asserts pipe persisted)
-// -> send a unique marker prompt -> assert the user bubble + assistant prose
-// rendered into #log -> reopen the session from the popover and assert the
-// history replay -> archive the probe session.
+// -> model picker (3b): Pinned top section (from the DSH model-picker
+// settings, when pins exist) + live search filtering + a row-click model
+// switch with restore of the original selection -> send a unique marker
+// prompt -> assert the user bubble + assistant prose rendered into #log ->
+// reopen the session from the popover and assert the history replay ->
+// archive the probe session.
 import { spawn, spawnSync } from 'node:child_process'
 import vm from 'node:vm'
 import fs from 'node:fs'
@@ -248,6 +251,158 @@ if (!fs.existsSync(probeFile) || fs.statSync(probeFile).mtimeMs <= before) fail(
 const probeData = JSON.parse(fs.readFileSync(probeFile, 'utf8'))
 process.stderr.write(`[harness] probe persisted: api=${probeData.api?.status} root=${probeData.root?.status} fenced=${probeData.fenced?.status} origin=${probeData.origin}\n`)
 
+// ---------- 3b. Model picker: search + Pinned top section ----------
+// Parity with the user's DSH model picker plugin (dsh-model-picker-augmented):
+// the bridge now reads that plugin's settings section (pinned order + hidden
+// keys) alongside the catalog, and the panel renders a Pinned section on top
+// plus a live row search. The expected row set below is computed from the SW
+// own 'models' reply — the exact data the panel renders (pipe → SW → panel,
+// all real). Runs before the first prompt (section 4), so a row click
+// switches locally only (no session exists yet — the choice is remembered
+// for the first prompt), and the original selection is restored before the
+// probe prompt so section 4's model is unchanged.
+const modelBtnEl = doc.getElementById('model')
+const modelPopEl = doc.getElementById('modelpop')
+const searchInput = doc.getElementById('modelpop-search-input')
+const searchClearBtn = doc.getElementById('modelpop-search-clear')
+if (!searchInput || !searchClearBtn) fail('picker search markup missing')
+await modelBtnEl.click()
+let pickRows = doc.querySelectorAll('#modelpop .mp-row')
+waited = 0
+while (pickRows.length === 0 && waited < 15000) {
+  const errStrip = doc.querySelector('#modelpop .mp-strip.err')
+  if (errStrip) fail('picker error strip: ' + errStrip.textContent)
+  await sleep(250); waited += 250
+  pickRows = doc.querySelectorAll('#modelpop .mp-row')
+}
+if (!pickRows.length) fail('picker rendered no rows')
+const catalog = await swDispatch({ type: 'models' })
+if (!catalog?.ok || !Array.isArray(catalog.groups)) fail('SW models reply malformed')
+const catalogPinned = catalog.pinned ?? []
+const catalogHidden = new Set(catalog.hidden ?? [])
+// Expected visible rows for a query — mirrors the panel's render logic
+// (the DSH plugin's buildRows rules): pinned first (in catalog, not hidden,
+// user order, removed from their groups), then the groups (pinned removed,
+// search-empty groups gone); a row matches when the query is a substring of
+// the model name, the model id, or the provider name (case-insensitive).
+// Two key formats: settings/pins are stored "provider/model" (wire format),
+// while a picker row's title is "provider / model" (the DOM convention m2
+// depends on) — expected values below use the title format for DOM compare.
+const byKeyAll = new Map()
+for (const g of catalog.groups) for (const m of g.models) byKeyAll.set(g.provider + '/' + m.model, true)
+const expectedPinKeys = catalogPinned.filter((k) => byKeyAll.has(k) && !catalogHidden.has(k))
+const pinTitleOf = (k) => k.replace('/', ' / ')
+const expectedKeys = (q) => {
+  const byKey = new Map()
+  for (const g of catalog.groups) for (const m of g.models) byKey.set(g.provider + '/' + m.model, { g, m })
+  const pinned = []
+  const pinnedSet = new Set()
+  for (const key of catalogPinned) {
+    const e = byKey.get(key)
+    if (e && !catalogHidden.has(key)) { pinned.push(e); pinnedSet.add(key) }
+  }
+  // Same normalization as the panel: trim + lowercase the query once.
+  const qn = q.trim().toLowerCase()
+  const match = (g, m) =>
+    qn === '' || m.name.toLowerCase().includes(qn) || m.model.toLowerCase().includes(qn) || g.name.toLowerCase().includes(qn)
+  const pinnedVisible = pinned.filter(({ g, m }) => match(g, m))
+  const groups = catalog.groups
+    .map((g) => ({ ...g, models: g.models.filter((m) => !pinnedSet.has(g.provider + '/' + m.model) && match(g, m)) }))
+    .filter((g) => g.models.length > 0)
+  // pinnedVisible holds {g, m} pairs; the group arrays hold model entries
+  // addressed by their group's provider. Title format (matches r.title).
+  return [
+    ...pinnedVisible.map(({ g, m }) => g.provider + ' / ' + m.model),
+    ...groups.flatMap((g) => g.models.map((m) => g.provider + ' / ' + m.model)),
+  ]
+}
+const domKeys = () => [...doc.querySelectorAll('#modelpop .mp-row')].map((r) => r.title)
+const sameKeys = (a, b) => a.length === b.length && a.every((k, i) => k === b[i])
+const fullKeys = expectedKeys('')
+if (!sameKeys(domKeys(), fullKeys)) fail('picker full list does not match the SW catalog (order incl. pinned section)')
+// Pinned section: present iff the DSH picker has pins that survive
+// (in catalog, not hidden) — in the user's order, deduped from groups.
+const pinHeader = doc.querySelector('#modelpop .mp-group.pin')
+if (expectedPinKeys.length > 0) {
+  if (!pinHeader) fail('Pinned section missing although the DSH picker has pins')
+  if (pinHeader.textContent.trim() !== 'Pinned') fail('Pinned header label: ' + pinHeader.textContent)
+  const actualPinKeys = [...doc.querySelectorAll('#modelpop .mp-row')].slice(0, expectedPinKeys.length).map((r) => r.title)
+  if (!sameKeys(actualPinKeys, expectedPinKeys.map(pinTitleOf))) fail('pinned rows have wrong keys or order')
+  if (new Set(domKeys()).size !== domKeys().length) fail('a model row appears twice (pinned + group)')
+} else if (pinHeader) {
+  fail('Pinned section rendered although the DSH picker has no pins')
+}
+// Search: a query that actually filters (the first row's model id — unique
+// in the catalog; other rows can still contain it in name/provider).
+let query = domKeys()[0].split(' / ').slice(1).join(' / ')
+if (expectedKeys(query).length === domKeys().length) query = catalog.groups[0].name
+const searchExpected = expectedKeys(query)
+if (searchExpected.length === domKeys().length) fail('no filtering query found (catalog too small?)')
+searchInput.value = query
+searchInput.dispatchEvent(new window.Event('input', { bubbles: true }))
+if (searchClearBtn.hidden) fail('clear button not shown with an active query')
+if (!sameKeys(domKeys(), searchExpected)) fail(`search "${query}": rows do not match expected (${domKeys().length} vs ${searchExpected.length})`)
+// A query nothing matches: rows vanish, the no-match strip appears.
+searchInput.value = 'zzqzx-404-none'
+searchInput.dispatchEvent(new window.Event('input', { bubbles: true }))
+if (doc.querySelector('#modelpop .mp-row')) fail('no-match query still renders rows')
+if (!/No models match/.test(doc.querySelector('#modelpop .mp-strip')?.textContent ?? '')) fail('no-match strip missing')
+// Escape inside the field clears the query (DSH parity) and keeps the
+// popover open; the full list comes back.
+searchInput.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }))
+if (searchInput.value !== '' || !searchClearBtn.hidden) fail('Escape did not clear the search query')
+if (modelPopEl.hidden) fail('Escape cleared the query but also closed the popover')
+if (!sameKeys(domKeys(), fullKeys)) fail('full list not restored after Escape')
+// The clear button resets too.
+searchInput.value = query
+searchInput.dispatchEvent(new window.Event('input', { bubbles: true }))
+searchClearBtn.click()
+if (searchInput.value !== '' || !searchClearBtn.hidden) fail('clear button did not reset the query')
+if (!sameKeys(domKeys(), fullKeys)) fail('full list not restored after clear button')
+// Row click: prefer an unselected PINNED row (proves the Pinned section is
+// fully wired); the switch is local-only before the first prompt.
+const allPickRows = [...doc.querySelectorAll('#modelpop .mp-row')]
+const pickCandidate =
+  allPickRows.slice(0, expectedPinKeys.length).find((r) => !r.classList.contains('selected')) ??
+  allPickRows.find((r) => !r.classList.contains('selected'))
+if (!pickCandidate) fail('no unselected picker row to switch to')
+const pickName = pickCandidate.querySelector('.mp-name').textContent
+const pickFromPin = allPickRows.indexOf(pickCandidate) < expectedPinKeys.length
+await pickCandidate.click()
+// The label updates synchronously; a failed switch would leave a
+// 'send failed' entry in #log (ui.sendFail).
+if (doc.getElementById('model-label').textContent !== pickName) fail(`model label did not switch to ${pickName}`)
+waited = 0
+let switchErr = ''
+while (waited < 5000) {
+  await sleep(250); waited += 250
+  switchErr = [...doc.querySelectorAll('#log .toolresult.err')].map((n) => n.textContent).join(' ')
+  if (switchErr.includes('send failed')) break
+}
+if (switchErr.includes('send failed')) fail('model switch failed: ' + switchErr)
+// Restore the original selection before the probe prompt: section 4 must
+// run on the same model the panel started with (best effort — the original
+// row is still in the catalog; matched by provider/model key, not by label
+// text, so a display-name collision cannot restore the wrong model; the
+// click closes the popover).
+const originalKey = catalog.selection ? `${catalog.selection.provider} / ${catalog.selection.model}` : null
+await modelBtnEl.click()
+waited = 0
+let restoreRow = null
+while (waited < 5000) {
+  await sleep(250); waited += 250
+  restoreRow = originalKey
+    ? [...doc.querySelectorAll('#modelpop .mp-row')].find((r) => r.title === originalKey) ?? null
+    : null
+  if (restoreRow || doc.querySelector('#modelpop .mp-strip.err')) break
+}
+if (restoreRow) {
+  await restoreRow.click()
+} else {
+  process.stderr.write('[harness] picker: original model not found for restore (best effort)\n')
+}
+process.stderr.write(`[harness] picker: ${fullKeys.length} rows, ${expectedPinKeys.length} pinned, search "${query}" -> ${searchExpected.length} rows, switched to ${pickName} (from pinned: ${pickFromPin}), restored: ${!!restoreRow}\n`)
+
 // ---------- 4. Send a unique marker prompt; assert the conversation renders ----------
 // Drift-free target: the old version pinned a hardcoded live session, and once
 // that session fell outside the popover's 20-row window the row matcher picked
@@ -348,6 +503,12 @@ const out = {
   status: sendReady() ? 'ready' : 'not-ready',
   sessionRows: rows.length,
   probe: { api: probeData.api?.status, root: probeData.root?.status, fenced: probeData.fenced?.status, persisted: true },
+  picker: {
+    rows: fullKeys.length,
+    pinned: expectedPinKeys,
+    search: { query, matched: searchExpected.length },
+    switch: { to: pickName, fromPinned: pickFromPin, restored: !!restoreRow },
+  },
   marker: MARKER,
   session: { id: SID, archived: true },
   rendered: {

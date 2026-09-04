@@ -35,8 +35,11 @@
  * a client-response.
  *
  * Local methods answered without a DSH round trip:
- *   augmentor/models      llm.models + host.describe, reshaped to the legacy
- *                         catalog.groups[{provider, models[{model}]}] + default
+ *   augmentor/models      llm.models + host.describe + settings.describe,
+ *                         reshaped to the legacy catalog.groups[{provider,
+ *                         models[{model}]}] + default, plus the DSH picker's
+ *                         curation (pinned/hidden, from the
+ *                         model-picker-augmented settings section)
  *   initialize            {serverInfo} from host.describe — the DSH app IS the
  *                         runtime; there is nothing to start
  *   augmentor/switchModel error (per-session model switching lands in M3 via
@@ -665,7 +668,25 @@ const localMethods = {
     return { ok: failures.length === 0, version, files: count, failures, warnings }
   },
   async 'augmentor/models'() {
-    const [models, describe] = await Promise.all([dsh('llm.models', {}), dsh('host.describe', {})])
+    // Curation (pinned order + hidden keys) comes from the
+    // model-picker-augmented settings section — the DSH model-picker plugin's
+    // pins live in $DSH_HOME/settings.yaml under that namespace. Best
+    // effort: when the namespace is absent (the plugin is not installed) or
+    // settings cannot be read, the picker degrades to the plain list.
+    const [models, describe, settings] = await Promise.all([
+      dsh('llm.models', {}),
+      dsh('host.describe', {}),
+      dsh('settings.describe', {}).catch(() => null),
+    ])
+    const curated = (settings?.namespaces ?? []).find((n) => n?.ns === 'model-picker-augmented')
+    const pinned = Array.isArray(curated?.value?.pinned)
+      ? curated.value.pinned.filter((k) => typeof k === 'string')
+      : []
+    const hiddenRaw = curated?.value?.hidden
+    const hidden =
+      hiddenRaw && typeof hiddenRaw === 'object' && !Array.isArray(hiddenRaw)
+        ? Object.keys(hiddenRaw).filter((k) => hiddenRaw[k])
+        : []
     return {
       groups: (models.groups ?? []).map((g) => ({
         provider: g.id,
@@ -678,6 +699,12 @@ const localMethods = {
       })),
       failures: models.failures ?? [],
       default: { provider: describe.provider, model: describe.model },
+      // The DSH picker's curation, so the Augmentor picker mirrors it:
+      // pinned is the user's ordered "provider/model" key list, hidden the
+      // keys the user hid in DSH (a pinned-but-hidden model is pinned
+      // nowhere). The panel applies the same rules as the plugin's buildRows.
+      pinned,
+      hidden,
     }
   },
   async initialize() {

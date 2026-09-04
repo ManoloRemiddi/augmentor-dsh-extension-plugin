@@ -144,6 +144,13 @@ export function ensurePort() {
         throw new Error(catalog?.error ?? 'no models available (check $DSH_HOME/settings.yaml)')
       }
       state.catalog = groups
+      // The DSH picker's curation rides the same bridge result (empty lists
+      // when the settings namespace is absent — the picker then shows no
+      // Pinned section).
+      state.catalogCuration = {
+        pinned: Array.isArray(catalog?.pinned) ? catalog.pinned : [],
+        hidden: Array.isArray(catalog?.hidden) ? catalog.hidden : [],
+      }
       state.selection = sel
       saveSelection(sel)
       const result = await request('initialize', {

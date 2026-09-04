@@ -299,10 +299,31 @@
     background: var(--layer1); border: 1px solid var(--border2); border-radius: 10px;
     box-shadow: 0 8px 30px rgba(0, 0, 0, 0.35); }
   #modelpop[hidden] { display: none; }
+  /* Picker search (parity with the DSH model-picker-augmented plugin):
+     filters rows by model name/id or provider name, case-insensitive; the
+     clear button appears only while a query is active. */
+  #modelpop-search { position: relative; margin-bottom: 6px; }
+  #modelpop-search > svg { position: absolute; left: 7px; top: 50%; transform: translateY(-50%);
+    color: var(--text3); pointer-events: none; }
+  #modelpop-search-input { width: 100%; box-sizing: border-box; font: inherit; font-size: 11px;
+    background: var(--bg); color: var(--text); border: 1px solid var(--border2);
+    border-radius: 7px; padding: 5px 26px 5px 24px; outline: none; }
+  #modelpop-search-input:focus { border-color: var(--brand); }
+  #modelpop-search-input::placeholder { color: var(--text3); }
+  #modelpop-search-clear { position: absolute; right: 4px; top: 50%; transform: translateY(-50%);
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 16px; height: 16px; border: none; border-radius: 4px; padding: 0;
+    background: transparent; color: var(--text3); cursor: pointer; }
+  #modelpop-search-clear:hover { background: var(--hover); color: var(--text); }
+  #modelpop-search-clear[hidden] { display: none; }
   #modelpop-body { max-height: 264px; overflow-y: auto; }
   .mp-group { font-size: 10px; font-weight: 700; color: var(--text3); text-transform: uppercase;
     letter-spacing: 0.06em; margin: 8px 6px 2px; }
   .mp-group:first-child { margin-top: 2px; }
+  /* Pinned section header: the DSH picker's pin list rides on top (same
+     .mp-group look, pin glyph for a glanceable difference). */
+  .mp-group.pin { display: flex; align-items: center; gap: 5px; }
+  .mp-group.pin svg { flex: none; }
   .mp-row { display: flex; align-items: center; gap: 8px; width: 100%; text-align: left;
     border: none; background: transparent; color: var(--text); font: inherit;
     border-radius: 7px; padding: 6px 8px; cursor: pointer; }
@@ -525,11 +546,22 @@
     Brightness shifts lightness in both themes.</p>
 </div>
 <!-- Model picker popover (opened by the #model chip in the strip): the DSH
-     app's model catalog, rows rendered by sidepanel.js. The footer's
-     Refresh button forces a fresh bridge catalog fetch: the SW serves the
-     handshake's memory copy otherwise, and the DSH app's model set can
-     change while the panel is open (a model added to settings.yaml). -->
+     app's model catalog, rows rendered by sidepanel.js. The search field
+     filters rows live (model name/id or provider name, DSH
+     model-picker-augmented parity); when that plugin's settings carry a
+     pinned list, a Pinned section renders on top of the provider groups.
+     The footer's Refresh button forces a fresh bridge catalog fetch (pins
+     included): the SW serves the handshake's memory copy otherwise, and the
+     DSH app's model set can change while the panel is open (a model added
+     to settings.yaml). -->
 <div id="modelpop" hidden role="dialog" aria-label="Choose model">
+  <div id="modelpop-search">
+    <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true"><circle cx="7" cy="7" r="4.5"/><path d="m10.3 10.3 3.7 3.7"/></svg>
+    <input id="modelpop-search-input" type="text" placeholder="Search models…" spellcheck="false" autocomplete="off" aria-label="Search models">
+    <button id="modelpop-search-clear" type="button" aria-label="Clear search" hidden>
+      <svg width="11" height="11" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M4.5 4.5l7 7M11.5 4.5l-7 7"/></svg>
+    </button>
+  </div>
   <div id="modelpop-body"></div>
   <div id="modelpop-foot" class="mp-strip">
     <span id="modelpop-foot-status" role="status"></span>

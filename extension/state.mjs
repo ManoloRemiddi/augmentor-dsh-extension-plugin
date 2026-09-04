@@ -48,6 +48,11 @@ export const state = {
   // handshake). The panel's picker renders from both.
   catalog: null,
   selection: null,
+  // The DSH model picker's curation (the dsh-model-picker-augmented plugin's
+  // settings section): pinned is the user's ordered "provider/model" key
+  // list, hidden the keys the user hid in DSH. Rides with the catalog so the
+  // panel's picker renders the same Pinned top section as the DSH app.
+  catalogCuration: { pinned: [], hidden: [] },
   // The DSH app's home directory (host.describe) — the working directory for
   // the session we create on first prompt.
   homeDir: null,

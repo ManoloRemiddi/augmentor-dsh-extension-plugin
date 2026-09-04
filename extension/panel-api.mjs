@@ -18,6 +18,7 @@ import {
   broadcast,
   saveSessionId,
   clearStoredSessionId,
+  saveSelection,
 } from './state.mjs'
 import {
   ensurePort,
@@ -26,6 +27,14 @@ import {
   sessionHistoryOk,
 } from './port.mjs'
 import { overlayFade } from './overlay.mjs'
+
+// The DSH picker's curation rides every catalog reply: the panel's picker
+// shows the same Pinned top section as the DSH app (empty lists when the
+// settings namespace is absent — no Pinned section, plain list).
+const curationOf = (c) => ({
+  pinned: Array.isArray(c?.pinned) ? c.pinned : [],
+  hidden: Array.isArray(c?.hidden) ? c.hidden : [],
+})
 
 export function handlePanelMessage(msg, sender, sendResponse) {
   // S5 (audit): accept messages only from this extension's own pages.
@@ -45,6 +54,7 @@ export function handlePanelMessage(msg, sender, sendResponse) {
       sessionId: state.sessionId,
       model: state.selection,
       models: state.catalog,
+      ...curationOf(state.catalogCuration),
       // M3: chat-lifecycle state for the panel (Open-in-DSH + Save badge).
       endpoint: state.endpoint,
       chatCwd: state.chatCwd,
@@ -201,6 +211,7 @@ export function handlePanelMessage(msg, sender, sendResponse) {
       running: state.running,
       model: state.selection,
       models: state.catalog,
+      ...curationOf(state.catalogCuration),
       // M3: the 2 s poll keeps the panel's Save badge + Open-in-DSH button
       // current without any dedicated round trip.
       sessionId: state.sessionId,
@@ -215,19 +226,20 @@ export function handlePanelMessage(msg, sender, sendResponse) {
     // handshake already fetched it; otherwise a fresh bridge call (the panel
     // may open before the handshake lands, and the bridge serves the catalog
     // before the runtime is up, so the call is safe in 'connecting' too).
-    const respond = (groups, error) =>
-      sendResponse({ ok: groups !== null, groups, selection: state.selection, error: error ?? null })
-    if (state.catalog) return respond(state.catalog, null)
+    const respond = (groups, error, curation) =>
+      sendResponse({ ok: groups !== null, groups, selection: state.selection, error: error ?? null, ...curationOf(curation) })
+    if (state.catalog) return respond(state.catalog, null, state.catalogCuration)
     if (!state.port) {
-      sendResponse({ ok: false, groups: null, selection: state.selection, error: state.error ?? `not ready (phase: ${state.phase})` })
+      sendResponse({ ok: false, groups: null, selection: state.selection, error: state.error ?? `not ready (phase: ${state.phase})`, ...curationOf(state.catalogCuration) })
       return
     }
     request('augmentor/models')
       .then((catalog) => {
         state.catalog = Array.isArray(catalog?.groups) ? catalog.groups : []
-        respond(state.catalog, catalog?.error ?? null)
+        state.catalogCuration = curationOf(catalog)
+        respond(state.catalog, catalog?.error ?? null, state.catalogCuration)
       })
-      .catch((e) => sendResponse({ ok: false, groups: null, selection: state.selection, error: e.message }))
+      .catch((e) => sendResponse({ ok: false, groups: null, selection: state.selection, error: e.message, ...curationOf(state.catalogCuration) }))
     return true // async
   }
   if (msg?.type === 'models-refresh') {
@@ -249,9 +261,10 @@ export function handlePanelMessage(msg, sender, sendResponse) {
           groups.some((g) => g.provider === sel.provider && g.models.some((m) => m.model === sel.model))
         if (!inCatalog(state.selection) && catalog?.default) state.selection = { ...catalog.default }
         state.catalog = groups
-        sendResponse({ ok: true, groups, selection: state.selection, error: catalog?.error ?? null })
+        state.catalogCuration = curationOf(catalog)
+        sendResponse({ ok: true, groups, selection: state.selection, error: catalog?.error ?? null, ...curationOf(state.catalogCuration) })
       })
-      .catch((e) => sendResponse({ ok: false, groups: null, selection: state.selection, error: e.message }))
+      .catch((e) => sendResponse({ ok: false, groups: null, selection: state.selection, error: e.message, ...curationOf(state.catalogCuration) }))
     return true // async
   }
   if (msg?.type === 'model') {

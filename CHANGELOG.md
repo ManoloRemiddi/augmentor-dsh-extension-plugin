@@ -11,6 +11,46 @@ All notable changes to Augmentor (the `dsh-augmentor` plugin + the Chromium
 extension). Versions are locked across `plugin/package.json` and
 `extension/manifest.json`.
 
+## 0.1.31 — 2026-09-04
+
+### Added
+
+- **Model picker search** — the side panel's model picker has a search
+  field: live filtering over the rows by model name, model id, or provider
+  group name (case-insensitive substring), a clear (×) button while a query
+  is active, Escape clears the query first and closes the popover on the
+  second press, a “No models match” strip when nothing hits, and groups the
+  search empties disappear. The query is not sticky across opens — a fresh
+  open always shows the full list.
+- **Pinned section (DSH picker parity)** — when the DSH app runs the
+  `model-picker-augmented` model-picker plugin, its pinned list now shows on
+  top of the Augmentor picker too: the pipe's `augmentor/models` reads the
+  plugin's `model-picker-augmented` settings section (`settings.describe`)
+  alongside the catalog, and pinned models render in a **Pinned** section in
+  the user's order, removed from their provider groups (no dupes), with
+  pinned-but-hidden keys pinned nowhere — the same row-building rules the
+  DSH plugin applies. Without the plugin, or without pins, the picker is
+  exactly as before. The picker's Refresh re-reads the settings, so pins
+  made in the DSH app while the panel is open land after Refresh (or
+  reconnect).
+
+### Fixed
+
+- **Model switching was broken since 0.1.29** — the service worker's
+  model-switch handler called `saveSelection` without importing it (lost in
+  the Tier-3 module split, `eb431dc`), so every picker row click threw a
+  `ReferenceError` in the SW: the switch never completed and the selection
+  was never persisted. Caught by the new picker e2e leg below.
+
+### Tests
+
+- `test/panel-e2e.mjs` gains a picker leg — against the live DSH app: the
+  full list's order versus the SW's own catalog (Pinned section included,
+  conditional on the settings actually carrying pins), search filtering
+  verified against an independently computed expected set, the no-match
+  strip, Escape / clear-button query reset, and a model switch from a pinned
+  row with the original selection restored before the probe prompt.
+
 ## 0.1.30 — 2026-09-01
 
 ### Added

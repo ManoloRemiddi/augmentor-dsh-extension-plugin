@@ -93,6 +93,16 @@ function popover({ btn, el, onOpen, canOpen, above = false, align = 'right', tog
 // DSH app's own model set). Picking a row switches the sidecar's model: the
 // bridge restarts the runtime, and the conversation resumes from its
 // persisted log. Switches land only while the turn is idle.
+//
+// Two DSH model-picker-augmented (the user's DSH model picker plugin)
+// parities ride the same replies:
+//  - search: live filter over the rows (model name/id or provider name,
+//    case-insensitive; the DSH plugin matches name+provider, the id is added
+//    here because the panel rows are addressed by id);
+//  - pins: the plugin's pinned list renders as a Pinned section on top, in
+//    the user's order — pinned rows are removed from their provider groups
+//    (no dupes), and a pinned-but-hidden model (hidden in DSH settings) is
+//    pinned nowhere, exactly as the DSH picker builds its rows.
 const modelBtn = document.getElementById('model')
 const modelLabel = document.getElementById('model-label')
 const modelPop = document.getElementById('modelpop')
@@ -100,12 +110,20 @@ const modelPopBody = document.getElementById('modelpop-body')
 const modelPopRefresh = document.getElementById('modelpop-refresh')
 const modelPopFoot = document.getElementById('modelpop-foot')
 const modelPopFootStatus = document.getElementById('modelpop-foot-status')
+const modelPopSearchInput = document.getElementById('modelpop-search-input')
+const modelPopSearchClear = document.getElementById('modelpop-search-clear')
 let pickerCatalog = null // groups: [{provider, name, models: [{provider, model, name}]}]
 let pickerSelection = null // {provider, model}
+let pickerQuery = '' // search text (the input's value; '' shows everything)
+let pickerPinned = [] // ordered "provider/model" keys from the DSH picker's settings
+let pickerHidden = new Set() // keys the user hid in the DSH picker's settings
 
 const CHECK_SVG =
   '<svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" ' +
   'stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 8.5l3 3 7-7"/></svg>'
+const PIN_SVG =
+  '<svg width="10" height="10" viewBox="0 0 16 16" fill="none" stroke="currentColor" ' +
+  'stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M8 14.5S3.5 10.2 3.5 6.5a4.5 4.5 0 1 1 9 0C12.5 10.2 8 14.5 8 14.5z"/><circle cx="8" cy="6.5" r="1.5"/></svg>'
 
 // Fold the model info out of a log/connect reply into picker state.
 function applyModelInfo(res) {
@@ -113,7 +131,24 @@ function applyModelInfo(res) {
   if (res.model && typeof res.model === 'object' && res.model.provider && res.model.model) {
     pickerSelection = res.model
   }
+  applyCuration(res)
   renderPicker()
+}
+
+// The curation (pinned order + hidden keys) rides the catalog replies as
+// plain arrays; missing/empty means the DSH picker has no pins — the panel
+// then renders the plain list.
+function applyCuration(res) {
+  if (Array.isArray(res.pinned)) pickerPinned = res.pinned
+  if (Array.isArray(res.hidden)) pickerHidden = new Set(res.hidden)
+}
+
+// Reset the search between popover opens (a fresh open shows the full list;
+// DSH parity — the query is not sticky across opens).
+function resetSearch() {
+  modelPopSearchInput.value = ''
+  pickerQuery = ''
+  modelPopSearchClear.hidden = true
 }
 
 // Trigger label = the selected model's catalog name (the event stream writes
@@ -125,9 +160,10 @@ function renderPicker() {
     const m = g?.models.find((x) => x.model === pickerSelection.model)
     modelLabel.textContent = m?.name ?? pickerSelection.model
   }
-  // Popover content (re-rendered on open and on every catalog/selection
-  // change; the open popover keeps its scroll position on unrelated events
-  // only when nothing relevant changed — cheap to just rebuild, it is tiny).
+  // Popover content (re-rendered on open, on every catalog/selection change,
+  // and on every search keystroke; the open popover keeps its scroll
+  // position on unrelated events only when nothing relevant changed — cheap
+  // to just rebuild, it is tiny).
   if (modelPop.hidden) return
   modelPopBody.replaceChildren()
   if (!pickerCatalog || !pickerCatalog.length) {
@@ -151,25 +187,66 @@ function renderPicker() {
     modelPopBody.appendChild(strip)
     return
   }
-  for (const g of pickerCatalog) {
+  // Row addressing: "provider/model" keys, the same shape the DSH picker
+  // plugin uses for its curation (pins are stored as those keys).
+  const rowKey = (g, m) => `${g.provider}/${m.model}`
+  const byKey = new Map()
+  for (const g of pickerCatalog) for (const m of g.models) byKey.set(rowKey(g, m), { g, m })
+  // Pinned section: the user's order, only keys that exist in THIS catalog
+  // and are not hidden (DSH parity — a pin whose model left the catalog or
+  // was hidden in DSH settings does not render).
+  const pinned = []
+  const pinnedSet = new Set()
+  for (const key of pickerPinned) {
+    const entry = byKey.get(key)
+    if (entry && !pickerHidden.has(key)) {
+      pinned.push(entry)
+      pinnedSet.add(key)
+    }
+  }
+  const q = pickerQuery.trim().toLowerCase()
+  const matches = (g, m) =>
+    q === '' || m.name.toLowerCase().includes(q) || m.model.toLowerCase().includes(q) || g.name.toLowerCase().includes(q)
+  const pinnedVisible = pinned.filter(({ g, m }) => matches(g, m))
+  // Provider groups: pinned rows leave their group (no dupes), and groups
+  // left empty by the search disappear.
+  const visibleGroups = pickerCatalog
+    .map((g) => ({ ...g, models: g.models.filter((m) => !pinnedSet.has(rowKey(g, m)) && matches(g, m)) }))
+    .filter((g) => g.models.length > 0)
+  const makeRow = (g, m) => {
+    const sel = pickerSelection && pickerSelection.provider === m.provider && pickerSelection.model === m.model
+    const row = document.createElement('button')
+    row.type = 'button'
+    row.className = 'mp-row'
+    if (sel) row.classList.add('selected')
+    row.title = `${g.provider} / ${m.model}`
+    // Static check SVG markup (no user data) via innerHTML; the name is
+    // textContent-only.
+    row.innerHTML = '<span class="mp-name"></span><span class="mp-check">' + CHECK_SVG + '</span>'
+    row.querySelector('.mp-name').textContent = m.name
+    row.addEventListener('click', () => chooseModel(m))
+    return row
+  }
+  if (pinnedVisible.length) {
+    const h = document.createElement('div')
+    h.className = 'mp-group pin'
+    h.innerHTML = PIN_SVG + '<span></span>'
+    h.querySelector('span').textContent = 'Pinned'
+    modelPopBody.appendChild(h)
+    for (const { g, m } of pinnedVisible) modelPopBody.appendChild(makeRow(g, m))
+  }
+  for (const g of visibleGroups) {
     const h = document.createElement('div')
     h.className = 'mp-group'
     h.textContent = g.name
     modelPopBody.appendChild(h)
-    for (const m of g.models) {
-      const sel = pickerSelection && pickerSelection.provider === m.provider && pickerSelection.model === m.model
-      const row = document.createElement('button')
-      row.type = 'button'
-      row.className = 'mp-row'
-      if (sel) row.classList.add('selected')
-      row.title = `${g.provider} / ${m.model}`
-      // Static check SVG markup (no user data) via innerHTML; the name is
-      // textContent-only.
-      row.innerHTML = '<span class="mp-name"></span><span class="mp-check">' + CHECK_SVG + '</span>'
-      row.querySelector('.mp-name').textContent = m.name
-      row.addEventListener('click', () => chooseModel(m))
-      modelPopBody.appendChild(row)
-    }
+    for (const m of g.models) modelPopBody.appendChild(makeRow(g, m))
+  }
+  if (!pinnedVisible.length && !visibleGroups.length) {
+    const strip = document.createElement('div')
+    strip.className = 'mp-strip'
+    strip.textContent = `No models match${q ? ` “${pickerQuery.trim()}”` : ''}.`
+    modelPopBody.appendChild(strip)
   }
 }
 
@@ -181,6 +258,7 @@ async function fetchModels() {
     if (res?.ok) {
       pickerCatalog = res.groups
       if (res.selection) pickerSelection = res.selection
+      applyCuration(res)
     } else if (res?.error) {
       modelPopBody.replaceChildren()
       const strip = document.createElement('div')
@@ -210,6 +288,9 @@ async function refreshModels() {
     if (res?.ok) {
       pickerCatalog = res.groups
       if (res.selection) pickerSelection = res.selection
+      // Refresh re-reads the DSH settings too, so pins made in the DSH app
+      // since the handshake land here.
+      applyCuration(res)
     } else if (res?.error) {
       modelPopFootStatus.textContent = res.error
       modelPopFoot.classList.add('err')
@@ -222,6 +303,30 @@ async function refreshModels() {
 }
 
 modelPopRefresh.addEventListener('click', refreshModels)
+
+// Live search: every keystroke re-renders the rows (pinned section and
+// groups filter together; an empty query restores the full list). The
+// clear button appears only while a query is active.
+modelPopSearchInput.addEventListener('input', () => {
+  pickerQuery = modelPopSearchInput.value
+  modelPopSearchClear.hidden = pickerQuery === ''
+  renderPicker()
+})
+modelPopSearchClear.addEventListener('click', () => {
+  resetSearch()
+  modelPopSearchInput.focus()
+  renderPicker()
+})
+// First Escape clears the query (the popover's document-level Escape keeps
+// closing only after the query is gone — DSH parity for the search field).
+modelPopSearchInput.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && pickerQuery !== '') {
+    e.preventDefault()
+    e.stopPropagation()
+    resetSearch()
+    renderPicker()
+  }
+})
 
 // Picked a row: ask the SW to switch (bridge restarts the runtime, the SW
 // re-initializes it with the new selection, the session resumes from its
@@ -250,7 +355,12 @@ const modelPopCtl = popover({
   el: modelPop,
   above: true,
   canOpen: () => !ui.state.running,
-  onOpen: () => renderPicker(),
+  onOpen: () => {
+    // A fresh open shows the full list (the previous open's query is not
+    // sticky — the input is cleared before the first render).
+    resetSearch()
+    renderPicker()
+  },
 })
 function closeModelPop() {
   modelPopCtl.close()
