@@ -79,9 +79,17 @@ jobs:
       - name: Chromium (playwright build + system deps)
         run: npx -y playwright@latest install --with-deps chromium
 
-      - name: DSH CLI (the same way the docs tell users)
+      - name: DSH CLI (pinned: newest pipe-compatible release)
         run: |
-          npm install -g @deepseek-ai/dsh@latest
+          # Pinned on purpose, not @latest: DSH 0.1.2-rc.1 gates every /api/*
+          # request behind a browser session cookie (dsh-auth-*, authority-bound
+          # and signed). The launch token only works as a GET / query param for
+          # the 303 cookie exchange — there is no header/query credential for
+          # the API itself. The Augmentor pipe is a background process with no
+          # browser cookie, so it cannot authenticate on 0.1.2-rc.1.
+          # 0.1.1-rc.2 is the newest CLI it can talk to. Bump (and re-prove)
+          # when a DSH release adds a local-client auth path the pipe can use.
+          npm install -g @deepseek-ai/dsh@0.1.1-rc.2
           dsh --version
 
       - name: Verify + pack (lockstep, changelog, asset)

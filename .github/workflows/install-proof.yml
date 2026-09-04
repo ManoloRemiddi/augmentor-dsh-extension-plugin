@@ -9,8 +9,9 @@ name: install-proof
 # fresh clone -> fresh DSH home -> dsh web -> dsh plugin add -> unpacked
 # extension -> install-native-host.sh -> restart -> handshake pipes: 1.
 # Runs the repo content that is being merged (PROOF_REPO = checkout path),
-# with the same `dsh` CLI a user gets from npm. No LLM credentials in CI,
-# so the LLM leg (PROOF_LLM=1) is left for a credentialed local shell.
+# with the newest `dsh` CLI the pipe can still authenticate to (pinned —
+# see the DSH CLI step). No LLM credentials in CI, so the LLM leg
+# (PROOF_LLM=1) is left for a credentialed local shell.
 
 on:
   push:
@@ -36,9 +37,13 @@ jobs:
       - name: Chromium (playwright build + system deps)
         run: npx -y playwright@latest install --with-deps chromium
 
-      - name: DSH CLI (the same way the docs tell users)
+      - name: DSH CLI (pinned: newest pipe-compatible release)
         run: |
-          npm install -g @deepseek-ai/dsh@latest
+          # Pinned on purpose, not @latest — see the identical comment in
+          # release.yml: DSH 0.1.2-rc.1 gates every /api/* request behind a
+          # browser session cookie the background pipe cannot hold, so the
+          # proof must run the newest CLI the pipe can still authenticate to.
+          npm install -g @deepseek-ai/dsh@0.1.1-rc.2
           dsh --version
 
       - name: Run the install proof

@@ -50,6 +50,21 @@ extension). Versions are locked across `plugin/package.json` and
   verified against an independently computed expected set, the no-match
   strip, Escape / clear-button query reset, and a model switch from a pinned
   row with the original selection restored before the probe prompt.
+- `test/install-proof.mjs` boot detection now understands DSH 0.1.2's
+  token-gated web surface (bare `GET /` returns 401; the banner URL's
+  `?token=` is exchanged for a session cookie) — on older DSH the probes
+  stay plain.
+
+### Compatibility
+
+- Proven against DSH CLI **0.1.1-rc.2** (the version both CI workflows are
+  pinned to). **DSH 0.1.2-rc.1 (npm `latest` at release time) is not
+  compatible with any Augmentor version**: it gates every `/api/*` request
+  behind a browser session cookie — the launch token only serves the
+  `GET /` → 303 cookie exchange, and there is no header/query credential for
+  the API itself — so the background pipe cannot authenticate at all. Keep a
+  0.1.1-series DSH (or the first 0.1.2 release that adds a local-client
+  auth path) until the pin in `.github/workflows/release.yml` is bumped.
 
 ## 0.1.30 — 2026-09-01
 
