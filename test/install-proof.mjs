@@ -111,9 +111,11 @@ const freePort = () => new Promise((res, rej) => {
   s.on('error', rej)
 })
 
+// authCookie (declared in step 4) is read at call time — only the LLM leg
+// (step 12) calls this, always after the first boot has authenticated.
 const rpc = (base, method, payload) => fetch(`${base}/api/${method}`, {
   method: 'POST',
-  headers: { 'content-type': 'application/json' },
+  headers: { 'content-type': 'application/json', ...(authCookie ? { cookie: authCookie } : {}) },
   body: JSON.stringify({ type: 'client-request', rpcId: `proof-${randomBytes(6).toString('hex')}`, method, payload }),
 }).then(async (res) => {
   const body = await res.json().catch(() => null)
@@ -168,19 +170,42 @@ const appLogFd = openSync(appLog, 'a')
 const app = track(spawn(DSH_BIN, ['web', '--no-open', '--port', String(PORT)], {
   env: appEnv, detached: true, stdio: ['ignore', appLogFd, appLogFd],
 }), 'dsh app')
+// ---- DSH 0.1.2 web auth -------------------------------------------------
+// DSH 0.1.2+ gates `dsh web` behind a bootstrap token: a bare GET / returns
+// 401 ("dsh web authentication required"), and the token printed in the
+// banner URL (`dsh web: http://…/?token=…`) is exchanged for a session
+// cookie (303 + Set-Cookie dsh-auth-…). Older DSH serves / open. On the old
+// DSH authCookie stays null and every probe below degrades to a plain
+// fetch; on 0.1.2+ the first 401 triggers the exchange and the cookie then
+// rides along. (Releases #5/#6 of v0.1.31 failed on this: the app was up
+// and listening, but the bare-`/` 200 probe could never see past the 401.)
+let authCookie = null
+const appFetch = (p) => fetch(`http://127.0.0.1:${PORT}${p}`, { headers: authCookie ? { cookie: authCookie } : {} })
+async function exchangeBannerToken() {
+  try {
+    const log = readFileSync(appLog, 'utf8')
+    const hits = log.match(/token=([A-Za-z0-9_-]+)/g)
+    if (!hits) return
+    const r = await fetch(`http://127.0.0.1:${PORT}/?token=${hits.at(-1).slice(6)}`, { redirect: 'manual' }).catch(() => null)
+    const sc = r?.status === 303 ? r.headers.get('set-cookie') : null
+    if (sc) authCookie = sc.split(',')[0] // name=value (the cookie value carries no comma)
+  } catch {}
+}
+
 let up = false
 // 300 s grace (150 × 2 s): a fresh runner's first `dsh web` boot seeds the
-// web profile from npm and can exceed 120 s under registry latency (observed
-// in release #5 / v0.1.31 — the app was still up, just not serving yet).
-// A crashed boot bails early via app.exitCode, so a slow seed is what this
-// window is for.
+// web profile from npm and can be slow under registry latency; a crashed
+// boot bails early via app.exitCode, so a slow seed is what this window is
+// for.
 for (let i = 0; i < 150; i++) {
-  try { const r = await fetch(`http://127.0.0.1:${PORT}/`) ; if (r.status === 200) { up = true ; break } } catch {}
+  const r = await appFetch('/').catch(() => null)
+  if (r?.status === 200) { up = true ; break }
+  if (r?.status === 401) await exchangeBannerToken() // 0.1.2+: the app is up — exchange, retry
   if (app.exitCode !== null) break
   await sleep(2000)
 }
 if (!up) { console.error(readFileSync(appLog, 'utf8').slice(-2000)) ; fail('dsh web boot (fresh DSH_HOME)', 'never served / — see dsh-app.log') }
-ok('dsh web boot (fresh DSH_HOME, profile seeded from npm)', `GET / 200`)
+ok('dsh web boot (fresh DSH_HOME, profile seeded from npm)', `GET / 200${authCookie ? ' (0.1.2 token-gated)' : ''}`)
 
 // ============================================================ 5. install plugin
 const tAdd = Date.now()
@@ -205,7 +230,7 @@ if (SOURCE === 'npm' && !process.env.PROOF_NPM_SPEC) {
 // ============================================================ 6. live-mount probe
 let liveMount = false
 for (let i = 0; i < 8 && !liveMount; i++) {
-  try { liveMount = (await fetch(`http://127.0.0.1:${PORT}/api/augmentor`)).status === 200 } catch {}
+  try { liveMount = (await appFetch('/api/augmentor')).status === 200 } catch {}
   await sleep(2000)
 }
 rec('live-mount probe (no restart)', liveMount ? 'true — app hot-mounted the plugin' : 'false — plugin composes at app boot (restart required)')
@@ -295,8 +320,11 @@ const app2 = track(spawn(DSH_BIN, ['web', '--no-open', '--port', String(PORT)], 
   env: appEnv, detached: true, stdio: ['ignore', appLogFd, appLogFd],
 }), 'dsh app (restart)')
 chrome = track(spawn(CHROME_BIN, chromeFlags, { env: chromeEnv, detached: true, stdio: ['ignore', chromeLogFd, chromeLogFd] }), 'chromium (restart)')
+authCookie = null // a restarted app re-signs the session cookie — exchange fresh
 for (let i = 0; i < 45; i++) {
-  try { if ((await fetch(`http://127.0.0.1:${PORT}/`)).status === 200) break } catch {}
+  const r = await appFetch('/').catch(() => null)
+  if (r?.status === 200) break
+  if (r?.status === 401) await exchangeBannerToken()
   await sleep(2000)
 }
 ok('app + chromium restart', 'relaunched on a free port')
@@ -306,7 +334,7 @@ let hs = null
 const tChain = Date.now()
 for (let i = 0; i < 60; i++) {
   try {
-    const r = await fetch(`http://127.0.0.1:${PORT}/api/augmentor`)
+    const r = await appFetch('/api/augmentor')
     if (r.status === 200) { hs = await r.json() ; if (hs.pipes >= 1) break }
   } catch {}
   await sleep(2000)
