@@ -37,7 +37,7 @@ jobs:
       - name: Chromium (playwright build + system deps)
         run: npx -y playwright@latest install --with-deps chromium
 
-      - name: DSH CLI (pinned: newest pipe-compatible release)
+      - name: "DSH CLI (pinned: newest pipe-compatible release)"
         run: |
           # Pinned on purpose, not @latest — see the identical comment in
           # release.yml: DSH 0.1.2-rc.1 gates every /api/* request behind a
