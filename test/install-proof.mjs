@@ -169,7 +169,12 @@ const app = track(spawn(DSH_BIN, ['web', '--no-open', '--port', String(PORT)], {
   env: appEnv, detached: true, stdio: ['ignore', appLogFd, appLogFd],
 }), 'dsh app')
 let up = false
-for (let i = 0; i < 60; i++) {
+// 300 s grace (150 × 2 s): a fresh runner's first `dsh web` boot seeds the
+// web profile from npm and can exceed 120 s under registry latency (observed
+// in release #5 / v0.1.31 — the app was still up, just not serving yet).
+// A crashed boot bails early via app.exitCode, so a slow seed is what this
+// window is for.
+for (let i = 0; i < 150; i++) {
   try { const r = await fetch(`http://127.0.0.1:${PORT}/`) ; if (r.status === 200) { up = true ; break } } catch {}
   if (app.exitCode !== null) break
   await sleep(2000)
