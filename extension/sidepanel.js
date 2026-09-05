@@ -12,6 +12,7 @@
  */
 
 import { createChatUI } from './chat-render.js'
+import { attachPromptLibrary } from './prompt-library.mjs'
 
 const ui = createChatUI({
   log: document.getElementById('log'),
@@ -37,6 +38,8 @@ modelObs.observe(document.getElementById('model-label'), { childList: true, char
 function send(type, payload) {
   return chrome.runtime.sendMessage({ type, ...payload })
 }
+
+attachPromptLibrary({input:document.getElementById('input'),send,settingsButton:document.getElementById('prompt-settings')})
 
 // F10 (audit): the header's three popovers (model picker, sessions, colors)
 // each carried their own open/close/position/outside-click/Escape
@@ -1254,6 +1257,7 @@ async function doSend() {
 
 document.getElementById('send').addEventListener('click', doSend)
 document.getElementById('input').addEventListener('keydown', (e) => {
+  if (e.defaultPrevented || e.isComposing) return
   if (e.key === 'Enter' && !e.shiftKey) {
     e.preventDefault()
     doSend()

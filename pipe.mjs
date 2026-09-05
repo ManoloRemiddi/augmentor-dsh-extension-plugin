@@ -71,6 +71,7 @@ import { decode as wireDecode, encode as wireEncode, Pending } from './wire.mjs'
 // its own tree; Node has no built-in zip reader, and shelling out to
 // unzip/python3 is too fragile for a release artifact path).
 import { unzipSync } from 'fflate'
+import { promptLibrary } from './shared/prompts.mjs'
 
 const AUGMENTOR_DIR = path.dirname(fileURLToPath(import.meta.url))
 
@@ -196,6 +197,7 @@ function redactTrace(line) {
     .replace(REDACT_QUERY_RE, '$1***redacted***')
 }
 function trace(entry) {
+  if (entry.msg?.method === 'augmentor/prompts') entry = {...entry, msg: {id:entry.msg.id, method:entry.msg.method, params:{action:entry.msg.params?.action}}}
   entry.at = Date.now()
   if (entry.kind === 'downlink' || entry.kind === 'ext<-pipe') return
   if (traceCapped) return
@@ -559,6 +561,7 @@ async function fetchJson(url, timeoutMs) {
 }
 
 const localMethods = {
+  'augmentor/prompts': (request) => promptLibrary(request, dsh),
   // Check npm (plugin) + GitHub releases (pipe/extension artifact) + the
   // live plugin handshake (installed plugin version) in parallel; each
   // source degrades to an `errors` entry instead of failing the whole check.

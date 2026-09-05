@@ -456,12 +456,12 @@ export function createChatUI(els) {
         break
       }
       case 'user/message': {
-        // Plugin-injected messages are backend plumbing, not the user: the
-        // system-prompt plugin logs its runtime-context snapshots as
-        // user/message events (source.kind === 'plugin', form 'snapshot') so
-        // the model-visible context is reconstructable from the log. They
-        // must never appear in the transcript.
-        if (data.source?.kind === 'plugin') break
+        // DSH records injected context as user/message too. Its source is
+        // extensible: workspace instructions use 'agent-instructions', while
+        // runtime snapshots use 'plugin'. Only human sources belong in the
+        // chat transcript. Keep legacy messages that predate source metadata.
+        // Filter provenance, never the text the user may be asking about.
+        if (data.source?.kind && data.source.kind !== 'user') break
         flushAssistant()
         const text = blockText(data.content)
         const m = el('div', 'msg user')

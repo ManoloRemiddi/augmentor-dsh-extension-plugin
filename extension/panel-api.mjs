@@ -45,6 +45,18 @@ export function handlePanelMessage(msg, sender, sendResponse) {
   // the sender is one of our own chrome-extension:// pages.
   if (!sender || sender.id !== chrome.runtime.id) return
   if (!sender.url || !sender.url.startsWith('chrome-extension://' + chrome.runtime.id)) return
+  if (msg?.type === 'promptSettings') {
+    const endpoint = state.endpoint || 'http://127.0.0.1:3080'
+    chrome.tabs.create({url: endpoint.replace(/\/+$/, '') + '/'})
+      .then(() => sendResponse({ok:true})).catch(error => sendResponse({ok:false,error:error.message}))
+    return true
+  }
+  if (msg?.type === 'prompts') {
+    ensurePort()
+    request('augmentor/prompts', msg.request ?? {action:'list'})
+      .then(sendResponse).catch(error=>sendResponse({ok:false,error:error.message}))
+    return true
+  }
   if (msg?.type === 'connect') {
     ensurePort()
     sendResponse({

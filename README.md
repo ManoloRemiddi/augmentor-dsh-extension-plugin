@@ -134,3 +134,9 @@ PROOF_SOURCE=npm PROOF_LLM=1 node test/install-proof.mjs   # npm plugin path (on
 ## License
 
 MIT.
+
+## Shared prompt library (local development update)
+
+The Settings gear opens DSH. Choose **Settings → Prompt library** to create, edit, rename or delete reusable prompts. Type `/` in the composer to filter by shortcut name. Arrow keys select, Enter/Tab inserts into the draft, and Escape dismisses. Insertion never sends automatically.
+
+Install the independent `dsh-prompt-library` plugin in the DSH web profile. The native pipe's `augmentor/prompts` method reads only its `prompt-library` settings namespace through the existing DSH API. Both Augmentor interfaces use that catalog; DSH owns the local storage and editor. The plugin imports the previous local JSON library once, if present. The extension no longer uses a separate Python prompt store. Reload the unpacked extension once after this development update.

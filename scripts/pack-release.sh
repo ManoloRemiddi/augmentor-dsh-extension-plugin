@@ -77,7 +77,7 @@ echo "pack: notes ok — $NOTES"
   || fail "plugin/dist/index.js missing — cd plugin && npm run prepare, then commit the rebuilt artifact"
 
 # 5. stage the allowlist
-for f in extension pipe.mjs wire.mjs install-native-host.sh presets \
+for f in extension shared pipe.mjs wire.mjs install-native-host.sh presets \
          package.json pnpm-lock.yaml plugin README.md LICENSE CHANGELOG.md .env.example; do
   [ -e "$ROOT/$f" ] || fail "allowlist entry missing from repo: $f"
 done
@@ -85,7 +85,7 @@ rm -f "$OUT"
 STAGE=$(mktemp -d)
 trap 'rm -rf "$STAGE"' EXIT
 mkdir -p "$STAGE/augmentor-$VER"
-for f in extension pipe.mjs wire.mjs install-native-host.sh presets \
+for f in extension shared pipe.mjs wire.mjs install-native-host.sh presets \
          package.json pnpm-lock.yaml plugin README.md LICENSE CHANGELOG.md .env.example; do
   cp -R "$ROOT/$f" "$STAGE/augmentor-$VER/"
 done
