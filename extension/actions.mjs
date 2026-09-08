@@ -124,6 +124,23 @@ export async function handleBrowserAction(id, params) {
                   }
                 }),
             }
+            // visibility-pack: keep the focus box alive across snapshot
+            const fb = document.getElementById('__dshAugFocusBox')
+            if (fb && out.regions?.length) {
+              const r0 = out.regions[0]
+              fb.style.left = r0.x - 4 + 'px'
+              fb.style.top = r0.y - 4 + 'px'
+              fb.style.width = r0.w + 8 + 'px'
+              fb.style.height = r0.h + 8 + 'px'
+              fb.style.display = 'block'
+              const fc = document.getElementById('__dshAugFocusChip')
+              if (fc) {
+                fc.textContent = 'reading: ' + (r0.text || r0.tag).slice(0, 50)
+                fc.style.left = r0.x + 'px'
+                fc.style.top = Math.max(4, r0.y - 26) + 'px'
+                fc.style.display = 'block'
+              }
+            }
             if (ov) ov.style.display = ''
             return out
           },
@@ -141,7 +158,8 @@ export async function handleBrowserAction(id, params) {
           (selector, pulse) => {
             const el = document.querySelector(selector)
             if (!el) return { ok: false, error: `no element matches selector: ${selector}` }
-            const dom = globalThis.__dshAugDom // dom-actions.js, same isolated world
+            const dom = globalThis.__dshAugDom
+            if (dom?.focus) { try { dom.focus(el, null) } catch {} } // dom-actions.js, same isolated world
             if (dom) dom.act(el, pulse) // visual only; fall back to a bare click
             el.click()
             return {
@@ -168,6 +186,7 @@ export async function handleBrowserAction(id, params) {
             if (!el) return { ok: false, error: `no element matches selector: ${selector}` }
             const dom = globalThis.__dshAugDom
             if (dom) dom.act(el, pulse) // so the user sees where the text lands
+            if (dom?.focus) { try { dom.focus(el, 'typing: ' + String(text).slice(0, 30)) } catch {} }
             el.focus()
             if ('value' in el) el.value = text
             else el.textContent = text

@@ -110,6 +110,11 @@ export function overlayFade(tabId) {
   inject(
     tabId,
     (id) => {
+      // visibility-pack 1.3: the focus box dies with the veil
+      const fb = document.getElementById('__dshAugFocusBox')
+      const fc = document.getElementById('__dshAugFocusChip')
+      if (fb) fb.style.display = 'none'
+      if (fc) fc.style.display = 'none'
       if (window.__dshAugVeil) return window.__dshAugVeil.fade()
       // veil.js never got in (older page state) — plain CSS fade.
       const root = document.getElementById(id)

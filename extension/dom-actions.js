@@ -38,6 +38,64 @@
   }
 
   /**
+   * visibility-pack 1.2: persistent focus outline + floating label chip.
+   * One outline div + one label chip are created once and MOVED between
+   * elements - cheap, no per-region DOM churn. `label` is what the model is
+   * touching/reading; call clearFocus() at turn end.
+   */
+  function focus(el, label, rgba) {
+    try {
+      let box = document.getElementById('__dshAugFocusBox')
+      let chip = document.getElementById('__dshAugFocusChip')
+      if (!box) {
+        box = document.createElement('div')
+        box.id = '__dshAugFocusBox'
+        box.style.cssText =
+          'position:fixed;pointer-events:none;z-index:2147483646;' +
+          'border:2px solid rgba(79,139,255,.9);border-radius:10px;' +
+          'box-shadow:0 0 20px rgba(79,139,255,.30);' +
+          'transition:left .18s ease, top .18s ease, width .18s ease, height .18s ease;'
+        document.body.appendChild(box)
+      }
+      if (!chip) {
+        chip = document.createElement('div')
+        chip.id = '__dshAugFocusChip'
+        chip.style.cssText =
+          'position:fixed;pointer-events:none;z-index:2147483647;' +
+          'font:600 11px system-ui;color:#fff;' +
+          'background:rgba(37,99,235,.92);' +
+          'padding:3px 10px;border-radius:99px;' +
+          'transition:left .18s ease, top .18s ease;max-width:280px;' +
+          'white-space:nowrap;overflow:hidden;text-overflow:ellipsis;' +
+          'box-shadow:0 2px 8px rgba(0,0,0,.25)'
+        document.body.appendChild(chip)
+      }
+      const r = el.getBoundingClientRect()
+      box.style.left = r.x - 4 + 'px'
+      box.style.top = r.y - 4 + 'px'
+      box.style.width = r.width + 8 + 'px'
+      box.style.height = r.height + 8 + 'px'
+      box.style.display = 'block'
+      chip.textContent = (label || humanName(el)).slice(0, 60)
+      chip.style.left = r.x + 'px'
+      chip.style.top = Math.max(4, r.y - 26) + 'px'
+      chip.style.display = 'block'
+      el.scrollIntoView({ block: 'center', behavior: 'smooth' })
+    } catch {
+      /* visual only - never fail an action for it */
+    }
+  }
+
+  function clearFocus() {
+    try {
+      const box = document.getElementById('__dshAugFocusBox')
+      const chip = document.getElementById('__dshAugFocusChip')
+      if (box) box.style.display = 'none'
+      if (chip) chip.style.display = 'none'
+    } catch { /* visual only */ }
+  }
+
+  /**
    * Pulse the element with a soft boxShadow bloom in the accent color.
    * `rgba` is the "rgba(r, g, b" prefix of the accent (sw.js keeps the
    * suffix off so the per-frame alpha can vary).
@@ -86,5 +144,8 @@
     ripple(el, rgba)
   }
 
-  globalThis.__dshAugDom = { humanName, pulse, ripple, act }
+  globalThis.__dshAugDom = { humanName, pulse, ripple, act,
+    focus,
+    clearFocus,
+  }
 })()
