@@ -95,6 +95,79 @@ const PLUGIN_WS_PATH = '/api/augmentor/ws'
 // clones from; the workflow's gh-release step names it in CI).
 const RELEASE_REPO = 'ManoloRemiddi/augmentor-dsh-extension-plugin'
 
+// ---------------------------------------------------------------------------
+// 2026-09-08 auth+transport shim (Kristan/Hermes patch):
+// dsh 0.1.2-rc.1 (browser-token auth, decision 2026-08-24) replaced the old
+// dotted REST surface with cookie-gated slash endpoints. The pipe's original
+// transport (bare POST /api/<dotted>) now 401s/404s on every call. This shim
+// implements the verified contract:
+//   - cookie from GET /?token=<launch> (303 + Set-Cookie), re-minted on 401
+//   - unary: POST /api/<ns/method>  body {type:'client-request',rpcId,method,payload:{args}}
+//   - old dotted names translate: session.list -> session/list {args:{_request}}, ...
+//   - host.describe / llm.models no longer exist: synthesized client-side
+//     from settings/describe (+ credentials/describe when needed).
+// The launch token arrives via DSH_AUGMENTOR_LAUNCH_TOKEN (set by dsh-run.sh).
+// ---------------------------------------------------------------------------
+function readLaunchToken() {
+  if (process.env.DSH_AUGMENTOR_LAUNCH_TOKEN) return process.env.DSH_AUGMENTOR_LAUNCH_TOKEN
+  try { return readFileSync('/home/kih/.dsh/augmentor-launch-token', 'utf8').trim() } catch { return '' }
+}
+const DSH_LAUNCH_TOKEN = readLaunchToken()
+let dshCookie = null
+let cookieSeq = 0
+
+async function dshCookieExchange(force = false) {
+  if (dshCookie && !force) return dshCookie
+  if (!DSH_LAUNCH_TOKEN) throw new Error('dsh: no DSH_AUGMENTOR_LAUNCH_TOKEN; cannot mint API cookie')
+  const res = await fetch(`${DSH_BASE}/?token=${encodeURIComponent(DSH_LAUNCH_TOKEN)}`, { redirect: 'manual' })
+  const sc = res.headers.get('set-cookie')
+  if (res.status !== 303 || !sc) throw new Error(`dsh: cookie exchange failed (HTTP ${res.status})`)
+  dshCookie = sc.split(';')[0]
+  return dshCookie
+}
+
+// old dotted name -> [slash endpoint, args-shaper]
+const METHOD_MAP = {
+  'session.list':        ['session/list',        (p) => ({ args: { _request: p?.args?._request ?? p?.request ?? {} } })],
+  'session.create':      ['session/create',      (p) => ({ args: { request: p?.args?.request ?? p?.request ?? {} } })],
+  'session.prompt':      ['session/prompt',      (p) => ({ args: { request: p?.args?.request ?? p?.request ?? {} } })],
+  'session.cancel':      ['session/cancel',      (p) => ({ args: { request: p?.args?.request ?? p?.request ?? {} } })],
+  'session.selectModel': ['session/selectModel', (p) => ({ args: { request: p?.args?.request ?? p?.request ?? {} } })],
+  'session.rename':      ['session/rename',      (p) => ({ args: { request: p?.args?.request ?? p?.request ?? {} } })],
+  'session.history':     ['session/page',        (p) => ({ args: { request: p?.args?.request ?? p?.request ?? {} } })],
+  'session.status':      ['session/page',        (p) => ({ args: { request: p?.args?.request ?? p?.request ?? {} } })],
+  'settings.describe':   ['settings/describe',   () => ({ args: {} })],
+  'settings.mutate':     ['settings/mutate',     (p) => ({ args: p?.args ?? {} })],
+}
+
+async function dshCall(method, args) {
+  const doFetch = async () => {
+    const rpcId = `pipe-${++cookieSeq}`
+    const res = await fetch(`${DSH_BASE}/api/${method}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', cookie: await dshCookieExchange() },
+      body: JSON.stringify({ type: 'client-request', rpcId, method, payload: { args } }),
+    })
+    return { res, rpcId }
+  }
+  let { res, rpcId } = await doFetch()
+  if (res.status === 401) {
+    dshCookie = null
+    ;({ res, rpcId } = await doFetch())
+  }
+  const body = await res.json().catch(() => null)
+  if (!body || body.type !== 'server-response' || body.rpcId !== rpcId) {
+    throw new Error(`${method}: unexpected envelope (http ${res.status})`)
+  }
+  if (!body.result?.ok) {
+    const e = body.result?.error ?? {}
+    throw new Error(e.message ?? JSON.stringify(e))
+  }
+  return body.result.value
+}
+// ---------------------------------------------------------------------------
+
+
 // Action-channel token (drives the user's browser, so it is gated). Same
 // resolution as the plugin: explicit env > $DSH_HOME/augmentor-ws-token
 // (0600, created by whichever side boots first) > generate. Both sides of
@@ -222,45 +295,36 @@ const log = (...parts) => {
 
 // ------------------------------------------------------- DSH /api client
 let rpcSeq = 0
-/** One client request: POST /api/<method> with the client-request envelope. */
+/**
+ * One client request. 2026-09-08: translated through METHOD_MAP to the
+ * cookie-gated slash endpoints (see the shim block above). Unknown dotted
+ * names pass through as `ns.dotted` -> NO slash mapping; those are rejected
+ * loudly so we notice gaps instead of silently 404ing.
+ */
 async function dsh(method, payload = {}) {
-  // S12 (audit): the method is interpolated into the URL path — constrain it
-  // to the stock method shape (session.prompt, host.describe,
-  // trace/fence-probe, …). Dotted/slash-separated alphanumeric segments only;
-  // `..`, leading dots and stray path characters are rejected.
-  if (typeof method !== 'string' || !/^[a-z][a-z0-9_-]*(?:[./][a-z0-9_-]+)*$/i.test(method)) {
-    throw new Error(`dsh: refusing invalid method name ${JSON.stringify(method)}`)
+  const mapped = METHOD_MAP[method]
+  if (mapped) {
+    const [endpoint, shape] = mapped
+    return dshCall(endpoint, shape(payload))
   }
-  const rpcId = `pipe-${++rpcSeq}`
-  const res = await fetch(`${DSH_BASE}/api/${method}`, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ type: 'client-request', rpcId, method, payload }),
-  })
-  const body = await res.json().catch(() => null)
-  if (!res.ok || !body || body.type !== 'server-response' || body.rpcId !== rpcId) {
-    throw new Error(`${method}: unexpected envelope (http ${res.ok ? 'ok' : res.status})`)
+  if (method === 'host.describe' || method === 'llm.models') {
+    // These surfaces no longer exist as Remote methods. Synthesize enough
+    // for the extension's model picker: settings/describe carries the catalog.
+    const settings = await dshCall('settings/describe', {})
+    return { provider: 'dsh', model: undefined, settings }
   }
-  if (!body.result.ok) {
-    const e = body.result.error ?? {}
-    throw new Error(e.message ?? JSON.stringify(e))
-  }
-  return body.result.value
+  throw new Error(`dsh: unmapped method ${JSON.stringify(method)} (no slash translation)`)
 }
 
-/** Answer a host-initiated server-request: POST /api/respond, client-response. */
+/** Answer a host-initiated server-request. 2026-09-08: the old /api/respond
+ * route is gone in the cookie-auth gateway; host-initiated requests now ride
+ * the plugin WS which carries its own ack semantics. Keep a trace stub. */
 async function dshRespond(rpcId, extMsg) {
   const result = extMsg.error
     ? { ok: false, error: { code: 'bad-request', message: extMsg.error.message ?? 'client refused', details: { issues: [] } } }
     : { ok: true, value: extMsg.result }
-  const res = await fetch(`${DSH_BASE}/api/respond`, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ type: 'client-response', rpcId, result }),
-  })
-  const receipt = await res.json().catch(() => null)
-  trace({ kind: 'respond', rpcId, receipt })
-  if (!receipt?.accepted) log('respond rejected', rpcId, receipt)
+  trace({ kind: 'respond-stub', rpcId, result })
+  log('respond: legacy /api/respond unavailable; result dropped', rpcId)
 }
 
 // ------------------------------------------------- extension frame I/O
@@ -497,11 +561,20 @@ function onDownlinkFrame(stream, frame) {
   sendToExt({ method: t.replace('/', '.'), params: payload })
 }
 
-function openDownlink(stream) {
+async function openDownlink(stream) {
   if (downlinks.get(stream)?.open) return
-  const ws = new WebSocket(`${DSH_BASE.replace(/^http/, 'ws')}${DOWNLINK_PATHS[stream]}`)
+  // 2026-09-08: single mux surface with the auth cookie; $events carries the
+  // forwarded event stream both legacy downlinks consumed.
+  const ws = new WebSocket(`${DSH_BASE.replace(/^http/, 'ws')}/api/remote.mux`, {
+    headers: { cookie: await dshCookieExchange() },
+  })
   downlinks.set(stream, { ws, open: true })
-  ws.on('open', () => log('downlink open', stream))
+  ws.on('open', () => {
+    log('downlink open', stream, '(remote.mux $events)')
+    try {
+      ws.send(JSON.stringify({ type: 'open', streamId: `dl-${stream}`, endpoint: '$events', payload: { args: {} } }))
+    } catch (e) { log('downlink subscribe failed', stream, e.message) }
+  })
   ws.on('message', (data) => {
     const frame = wireDecode(String(data))
     if (!frame) return
