@@ -124,10 +124,15 @@ export async function handleBrowserAction(id, params) {
                   }
                 }),
             }
-            // visibility-pack: keep the focus box alive across snapshot
+            // visibility-pack 1.4: focus the region the model is READING -
+            // the one containing the start of the text slice we return.
             const fb = document.getElementById('__dshAugFocusBox')
             if (fb && out.regions?.length) {
-              const r0 = out.regions[0]
+              const readStart = (out.text || '').slice(0, 50).replace(/\s+/g, ' ').trim()
+              const match =
+                out.regions.find((r) => r.text && readStart.startsWith(r.text.slice(0, Math.min(40, r.text.length)))) ??
+                out.regions[0]
+              const r0 = match
               fb.style.left = r0.x - 4 + 'px'
               fb.style.top = r0.y - 4 + 'px'
               fb.style.width = r0.w + 8 + 'px'
