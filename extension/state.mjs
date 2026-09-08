@@ -88,6 +88,9 @@ export const state = {
   // True from prompt-accept to turn/end. While a turn runs, browser actions
   // must NOT arm the idle fade — or the veil would flicker off between steps.
   turnActive: false,
+  // visibility-pack 3: auto-return bookkeeping
+  turnStartTabId: null,
+  turnStartUrl: null,
   // True while the veil is (expected to be) on screen. Gates the turn-end
   // "Done ✓": a text-only turn never raised the veil.
   overlayVisible: false,

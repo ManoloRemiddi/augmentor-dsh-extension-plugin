@@ -295,6 +295,15 @@ export function onSessionEvent(params) {
   // after the previous one ends.
   if (ev?.type === 'turn/start') {
     state.workTabId = null
+    // visibility-pack 3: remember the tab the user was on when the turn
+    // began; auto-return goes back there at turn/end (unpinned only).
+    chrome.tabs
+      .query({ active: true, lastFocusedWindow: true })
+      .then(([t]) => {
+        state.turnStartTabId = t?.id ?? null
+        state.turnStartUrl = t?.url ?? null
+      })
+      .catch(() => {})
   }
   // Turn ended: the agent gives back control — "Done", then fade. But only
   // if the veil is actually up: it follows real browser use, so a text-only
@@ -302,6 +311,21 @@ export function onSessionEvent(params) {
   // "Done ✓" on the user's tab.
   if (ev?.type === 'turn/end') {
     state.turnActive = false
+    // visibility-pack 3: auto-return. Skip when a tab is pinned (separate
+    // agent tab by design) and when the agent never left the start tab.
+    ;(async () => {
+      try {
+        const wt = await import('./worktab.mjs')
+        if (wt.pinnedWorkTabId() != null) return
+        const startId = state.turnStartTabId
+        const agentId = state.overlayTabId
+        if (startId == null || agentId == null || startId === agentId) return
+        const [t] = await chrome.tabs.query({ active: true, lastFocusedWindow: true })
+        // only return if the user is still watching the agent's tab
+        if (t?.id !== agentId) return
+        await chrome.tabs.update(startId, { active: true })
+      } catch { /* best-effort */ }
+    })()
     if (state.overlayVisible) {
       // A user Stop aborts the turn — label it as such, not "Done".
       const reason = ev?.data?.reason
