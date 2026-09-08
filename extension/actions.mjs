@@ -99,6 +99,30 @@ export async function handleBrowserAction(id, params) {
               links: [...document.querySelectorAll('a[href]')]
                 .slice(0, 40)
                 .map((a) => ({ text: (a.innerText || '').trim().slice(0, 80), href: a.href })),
+              // visibility-pack 1.1: element regions for the user's focus
+              // highlight - top-level visible blocks with viewport coords.
+              regions: [...document
+                .querySelectorAll('main, [role=main], article, section, h1, h2, h3, p, div')]
+                .filter((el) => {
+                  const r = el.getBoundingClientRect()
+                  const t = (el.innerText || '').replace(/\s+/g, ' ').trim()
+                  return (
+                    r.width > 100 && r.height > 40 &&
+                    r.bottom > 0 && r.top < innerHeight * 3 &&
+                    t.length > 3
+                  )
+                })
+                .slice(0, 60)
+                .map((el, i) => {
+                  const r = el.getBoundingClientRect()
+                  return {
+                    i,
+                    tag: el.tagName.toLowerCase(),
+                    text: (el.innerText || '').replace(/\s+/g, ' ').trim().slice(0, 60),
+                    x: Math.round(r.x), y: Math.round(r.y),
+                    w: Math.round(r.width), h: Math.round(r.height),
+                  }
+                }),
             }
             if (ov) ov.style.display = ''
             return out
