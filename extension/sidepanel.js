@@ -1007,6 +1007,24 @@ function setViewComposer(enabled) {
 let m3SessionId = null
 let m3Endpoint = null
 let m3Saved = new Set()
+
+// visibility-pack 2.2: pin/unpin the current tab as the agent's work tab.
+const pinBtn = document.getElementById('pin')
+function setPinVisual(on) {
+  pinBtn?.classList.toggle('on', on)
+  if (pinBtn) pinBtn.title = on
+    ? 'Unpin (the agent currently always drives the pinned tab)'
+    : "Pin this tab as the agent's work tab"
+}
+pinBtn?.addEventListener('click', async () => {
+  const cur = await chrome.runtime.sendMessage({ type: 'pinned-state' }).catch(() => null)
+  const res = await chrome.runtime
+    .sendMessage({ type: cur?.pinned ? 'unpin' : 'pin' })
+    .catch(() => null)
+  if (res?.ok) setPinVisual(res.pinned)
+})
+chrome.runtime.sendMessage({ type: 'pinned-state' }).then((r) => setPinVisual(!!r?.pinned)).catch(() => {})
+
 const saveBtn = document.getElementById('save')
 function updateSaveBadge(res) {
   if (typeof res.sessionId === 'string') m3SessionId = res.sessionId

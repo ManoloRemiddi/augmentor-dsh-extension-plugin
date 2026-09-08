@@ -36,7 +36,7 @@ const curationOf = (c) => ({
   hidden: Array.isArray(c?.hidden) ? c.hidden : [],
 })
 
-export function handlePanelMessage(msg, sender, sendResponse) {
+export async function handlePanelMessage(msg, sender, sendResponse) {
   // S5 (audit): accept messages only from this extension's own pages.
   // chrome.runtime.onMessage is unreachable from other extensions or the
   // web, but the panel renders content from OTHER DSH sessions — a hostile
@@ -191,6 +191,44 @@ export function handlePanelMessage(msg, sender, sendResponse) {
       }
     })()
     return true // async
+  }
+  if (msg?.type === 'pin' || msg?.type === 'unpin') {
+    // visibility-pack 2.2: pin the current active tab as the agent's
+    // dedicated work tab (or release the pin).
+    ;(async () => {
+      try {
+        const wt = await import('./worktab.mjs')
+        if (msg.type === 'unpin') {
+          await wt.clearPinnedWorkTab()
+          sendResponse({ ok: true, pinned: false })
+          return
+        }
+        let tab = null
+        try {
+          ;[tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true })
+        } catch {}
+        if (tab?.id != null) {
+          await wt.pinWorkTab(tab.id)
+          sendResponse({ ok: true, pinned: true, tabId: tab.id })
+        } else {
+          sendResponse({ ok: false, error: 'no active tab to pin' })
+        }
+      } catch (e) {
+        sendResponse({ ok: false, error: String(e?.message ?? e) })
+      }
+    })()
+    return true
+  }
+  if (msg?.type === 'pinned-state') {
+    ;(async () => {
+      try {
+        const wt = await import('./worktab.mjs')
+        sendResponse({ ok: true, pinned: wt.pinnedWorkTabId() != null })
+      } catch (e) {
+        sendResponse({ ok: false, error: String(e?.message ?? e) })
+      }
+    })()
+    return true
   }
   if (msg?.type === 'stop') {
     // M2: abort the live turn (session.cancel). The turn settles with

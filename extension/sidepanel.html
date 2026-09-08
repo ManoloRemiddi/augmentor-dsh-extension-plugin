@@ -423,6 +423,7 @@
   #updates-status.warn { color: var(--warn); }
   #updates-status.err { color: var(--err); }
   #updates-status.ok { color: var(--ok); }
+  #pin.on { color: #2563eb; }
 </style>
 </head>
 <body>
@@ -441,6 +442,13 @@
       <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor"
         stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
         <path d="M8 1.33l2.06 4.18 4.61.67-3.34 3.25.79 4.58-4.12-2.16-4.12 2.16.79-4.58-3.34-3.25 4.61-.67z" />
+      </svg>
+    </button>
+    <button id="pin" class="hbtn" title="Pin this tab as the agent's work tab (the agent then always drives this tab)" aria-label="Pin work tab">
+      <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor"
+        stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M8 1.5v6M5.5 4h6M8 7.5V13M4 13.5h8" />
+        <circle cx="8" cy="4" r="2.2" />
       </svg>
     </button>
     <button id="sessions" class="hbtn" title="Browse DSH app sessions" aria-label="Browse sessions">
