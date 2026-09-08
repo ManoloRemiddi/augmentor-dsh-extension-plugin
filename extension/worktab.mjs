@@ -118,7 +118,46 @@ chrome.tabs.onRemoved.addListener((tabId) => {
   recentActive.delete(tabId)
 })
 
+// ------------------------------------------------- visibility-pack 2.1
+// Pinned work tab: the agent drives THIS tab every turn while pinned; the
+// user's current tab is never hijacked. Survives MV3 idle-kill via
+// chrome.storage.session. Tab closure auto-unpins.
+let pinnedTabId = null
+export async function pinWorkTab(tabId) {
+  pinnedTabId = tabId
+  await chrome.storage.session.set({ augmentorPinnedTab: tabId }).catch(() => {})
+}
+export async function clearPinnedWorkTab() {
+  pinnedTabId = null
+  await chrome.storage.session.remove('augmentorPinnedTab').catch(() => {})
+}
+export function pinnedWorkTabId() {
+  return pinnedTabId
+}
+// Restore after SW restart (fire-and-forget at module load).
+chrome.storage.session
+  .get('augmentorPinnedTab')
+  .then((s) => {
+    if (s && Number.isInteger(s.augmentorPinnedTab)) pinnedTabId = s.augmentorPinnedTab
+  })
+  .catch(() => {})
+chrome.tabs.onRemoved.addListener(async (tabId) => {
+  if (pinnedTabId === tabId) await clearPinnedWorkTab()
+})
+
 export async function workTab() {
+  // visibility-pack 2.1: the pinned tab wins when it exists and is workable.
+  if (pinnedTabId != null) {
+    try {
+      const p = await chrome.tabs.get(pinnedTabId)
+      if (isWorkTab(p) || isEmptyTab(p)) {
+        state.workTabId = p.id
+        return p
+      }
+      // pinned tab became unworkable (DSH GUI etc.) - drop the pin
+      await clearPinnedWorkTab()
+    } catch { /* tab closed */ await clearPinnedWorkTab() }
+  }
   if (state.workTabId != null) {
     try {
       const t = await chrome.tabs.get(state.workTabId)
