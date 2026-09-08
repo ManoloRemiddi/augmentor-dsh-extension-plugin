@@ -1008,6 +1008,12 @@ let m3SessionId = null
 let m3Endpoint = null
 let m3Saved = new Set()
 
+// visibility-pack 4: return the work tab to the turn-start URL.
+const backBtn = document.getElementById('backtostart')
+backBtn?.addEventListener('click', async () => {
+  await chrome.runtime.sendMessage({ type: 'back-to-start' }).catch(() => {})
+})
+
 // visibility-pack 2.2: pin/unpin the current tab as the agent's work tab.
 const pinBtn = document.getElementById('pin')
 function setPinVisual(on) {

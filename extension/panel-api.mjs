@@ -192,6 +192,24 @@ export async function handlePanelMessage(msg, sender, sendResponse) {
     })()
     return true // async
   }
+  if (msg?.type === 'back-to-start') {
+    ;(async () => {
+      try {
+        const url = state.turnStartUrl
+        if (!url || !/^https?:\/\//i.test(url)) {
+          sendResponse({ ok: false, error: 'no remembered start URL' })
+          return
+        }
+        const wt = await import('./worktab.mjs')
+        const tab = await wt.workTab()
+        await chrome.tabs.update(tab.id, { url })
+        sendResponse({ ok: true, url })
+      } catch (e) {
+        sendResponse({ ok: false, error: String(e?.message ?? e) })
+      }
+    })()
+    return true
+  }
   if (msg?.type === 'pin' || msg?.type === 'unpin') {
     // visibility-pack 2.2: pin the current active tab as the agent's
     // dedicated work tab (or release the pin).
