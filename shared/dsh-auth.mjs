@@ -25,9 +25,17 @@ export function createDshClient(base, actionToken) {
     if (authenticating) return authenticating
     authenticating = (async () => {
       const probe = await request('/', { headers: headers() })
+      const probeCookie = probe.headers.getSetCookie?.()
+        .find(value => /^dsh-auth-[A-Za-z0-9_-]+=/.test(value))?.split(';')[0]
       await probe.body?.cancel()
       if (probe.status === 200) return
-      if (probe.status !== 401) throw new Error(`DSH authentication probe failed (HTTP ${probe.status})`)
+      if (probeCookie) {
+        cookie = probeCookie
+        return
+      }
+      if (probe.status !== 401 && probe.status !== 303 && probe.status !== 302 && probe.status !== 307) {
+        throw new Error(`DSH authentication probe failed (HTTP ${probe.status})`)
+      }
       cookie = ''
       const bootstrap = await request('/api/augmentor/auth', {
         method: 'POST', headers: { 'x-augmentor-token': actionToken },

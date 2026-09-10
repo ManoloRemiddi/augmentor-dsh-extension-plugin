@@ -17,7 +17,15 @@
 set -eu
 
 EXT_ID="${1:?usage: $0 <extension-id> [config-dir]}"
-CONFIG_DIR="${2:-$HOME/.config/chromium}"
+if [ -z "${2:-}" ]; then
+  if [ "$(uname -s)" = "Darwin" ]; then
+    CONFIG_DIR="$HOME/Library/Application Support/Google/Chrome"
+  else
+    CONFIG_DIR="$HOME/.config/chromium"
+  fi
+else
+  CONFIG_DIR="$2"
+fi
 HOST_NAME="com.deepseek.dsh.augmentor"
 NODE_BIN="${NODE:-$(command -v node || true)}"
 if [ -z "$NODE_BIN" ]; then
@@ -26,6 +34,15 @@ if [ -z "$NODE_BIN" ]; then
 fi
 
 AUGMENTOR_DIR="$(cd "$(dirname "$0")" && pwd)"
+if [ "$(uname -s)" = "Darwin" ]; then
+  case "$AUGMENTOR_DIR" in
+    "$HOME/Documents"*|"$HOME/Desktop"*|"$HOME/Downloads"*)
+      echo "warn: $AUGMENTOR_DIR is in a directory protected by macOS TCC (Desktop/Documents/Downloads)." >&2
+      echo "warn: Chrome's native messaging host may fail to launch with 'Native host has exited'." >&2
+      echo "warn: If this occurs, move the repository to a neutral path (e.g. ~/.dsh/augmentor)." >&2
+      ;;
+  esac
+fi
 # The host is the /api pipe (pipe.mjs) — the browser talks to DSH over a
 # loopback /api relay, no sidecar bridge.
 HOST_SH="$AUGMENTOR_DIR/bin/pipe-host.sh"
@@ -92,13 +109,16 @@ mkdir -p "$DSH_DATA_DIR"
     const file = path.join(dest, "agent.cordis.yml")
     if (fs.existsSync(file)) {
       const original = fs.readFileSync(file, "utf8")
-      // Rename only the legacy persona key, preserving the prompt and all
-      // customized entries. Retain an exclusive backup before migration.
-      const migrated = original.replace(/(name: .?@deepseek-ai\/dsh-persona.?\r?\n[ \t]+config:\r?\n[ \t]+)text:/, "$1prefix:")
-      if (migrated !== original) {
-        fs.writeFileSync(file + ".pre-0.1.32.bak", original, { flag: "wx" })
-        fs.writeFileSync(file, migrated)
-        console.log("migrated persona text to prefix; backup retained")
+      // Migrate persona config: ensure both text and prefix are present
+      // for dual DSH 0.1.2 and 0.1.5 compatibility. Retain an exclusive backup.
+      if (!original.includes("prefix:") && original.includes("text:")) {
+        const migrated = original.replace(/(name: .?@deepseek-ai\/dsh-persona.?\r?\n[ \t]+config:\r?\n[ \t]+)text:/, "$1text: &persona_prompt")
+          .replace(/(Only explain a failure when it matters for the answer\.\r?\n)/, "$1    prefix: *persona_prompt\n")
+        if (migrated !== original) {
+          fs.writeFileSync(file + ".pre-0.1.32.bak", original, { flag: "wx" })
+          fs.writeFileSync(file, migrated)
+          console.log("migrated persona config for dual DSH 0.1.2 and 0.1.5 compatibility; backup retained")
+        }
       }
     }
   }
