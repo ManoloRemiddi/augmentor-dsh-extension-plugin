@@ -35,6 +35,7 @@
 //   PROOF_TREE    copy a candidate or extracted release directory instead of cloning
 //   PROOF_MODEL_HOME  model settings to COPY for PROOF_LLM (default ~/.dsh)
 //   PROOF_SOURCE  local (default) | npm
+//   PROOF_MODEL_PICKER_SPEC  optional matching Model Picker GitHub asset or local tarball
 //   CHROME_BIN    chromium binary (default /usr/lib/chromium/chromium)
 //   PROOF_PORT    fixed app port (default: any free port)
 //   PROOF_LLM     1 = run the LLM browser leg (needs LLM credentials in env)
@@ -204,6 +205,12 @@ const tAdd = Date.now()
 const npmSpec = process.env.PROOF_NPM_SPEC || 'dsh-augmentor'
 const addArgs = SOURCE === 'npm' ? [npmSpec] : [path.join(REPO_DIR, 'plugin')]
 execFileSync(DSH_BIN, ['plugin', '--profile', 'web', 'add', ...addArgs], { env: appEnv, stdio: 'pipe' })
+if (process.env.PROOF_MODEL_PICKER_SPEC) {
+  execFileSync(DSH_BIN, ['plugin', '--profile', 'web', 'add', process.env.PROOF_MODEL_PICKER_SPEC], { env: appEnv, stdio: 'pipe' })
+  const picker = JSON.parse(readFileSync(path.join(ISOLATED_HOME, 'profiles', 'web', 'node_modules', 'dsh-model-picker-augmented', 'package.json'), 'utf8'))
+  if (picker.version !== '1.1.2') fail('Model Picker package version', `expected 1.1.2, got ${picker.version}`)
+  ok('Model Picker package', '1.1.2 installed in the fresh DSH profile')
+}
 const addedIn = ((Date.now() - tAdd) / 1000).toFixed(1) + 's'
 const pluginPkg = JSON.parse(readFileSync(path.join(REPO_DIR, 'plugin', 'package.json'), 'utf8'))
 ok(`dsh plugin --profile web add ${SOURCE === 'npm' ? `${npmSpec} (registry)` : '<clone>/plugin (local dir)'}`, addedIn)
@@ -376,7 +383,8 @@ ok('handshake asserts', `v${hs.version}, token-gated, preset=${hs.agentPreset}, 
 // ============================================================ 12. real UI + public API
 try {
   await browserProof({ base: `http://127.0.0.1:${PORT}`, cdpPort: CDP_PORT, extId,
-    token: tok, liveModel: WANT_LLM, ok, authCookie, handshake: hs })
+    token: tok, liveModel: WANT_LLM, ok, authCookie, handshake: hs,
+    modelPicker: Boolean(process.env.PROOF_MODEL_PICKER_SPEC) })
 } catch (error) { fail('browser and API compatibility', error.message) }
 if (!WANT_LLM) skip('LLM browser leg', 'PROOF_LLM=1 to run a real model')
 

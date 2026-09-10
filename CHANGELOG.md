@@ -39,6 +39,11 @@ extension). Versions are locked across `plugin/package.json` and
 - CI tests both the exact supported DSH version and npm `latest` instead of
   masking incompatibilities behind the old 0.1.1-rc.2 pin.
 
+- Fresh installation tests also install Model Picker Augmented 1.1.2 from its
+  GitHub release and verify its settings UI alongside the extension.
+- Installation instructions now include the complete GitHub bundle, local
+  authentication, explicit version pins and upgrades from incompatible releases.
+
 ## 0.1.31 — 2026-09-04
 
 ### Added

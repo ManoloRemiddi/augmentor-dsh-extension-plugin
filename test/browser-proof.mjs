@@ -27,7 +27,7 @@ async function connectCdp(url) {
   }
 }
 
-export async function browserProof({ base, cdpPort, extId, token, liveModel, ok, authCookie, handshake }) {
+export async function browserProof({ base, cdpPort, extId, token, liveModel, ok, authCookie, handshake, modelPicker = false }) {
   const cdpBase = `http://127.0.0.1:${cdpPort}`
   const api = async (method, args) => {
     const response = await fetch(`${base}/api/${method}`, {
@@ -52,6 +52,36 @@ export async function browserProof({ base, cdpPort, extId, token, liveModel, ok,
   await api('session/rename', { request: { sessionId: sid, title: 'Augmentor compatibility proof' } })
   assert((await api('session/list', { _request: {} })).items.some(row => row.sessionId === sid))
   ok('fresh-user chat creation', 'shipped preset loads; create, rename and list succeed')
+
+  if (modelPicker) {
+    const appTarget = await (await fetch(`${cdpBase}/json/new?about:blank`, { method: 'PUT' })).json()
+    const app = await connectCdp(appTarget.webSocketDebuggerUrl)
+    const evaluate = async expression => {
+      const result = await app.call('Runtime.evaluate', { expression, returnByValue: true, awaitPromise: true })
+      if (result.exceptionDetails) throw new Error(result.exceptionDetails.exception?.description ?? result.exceptionDetails.text)
+      return result.result?.value
+    }
+    const waitFor = async expression => {
+      for (let i = 0; i < 60; i++) { if (await evaluate(expression)) return; await sleep(250) }
+      throw new Error(`Model Picker UI did not become ready: ${expression}; page: ${(await evaluate('document.body.innerText')).slice(0, 1800)}`)
+    }
+    try {
+      const cookie = authCookie.split(';')[0]
+      const split = cookie.indexOf('=')
+      await app.call('Network.setCookie', { name: cookie.slice(0, split), value: cookie.slice(split + 1), url: base, httpOnly: true, sameSite: 'Lax' })
+      await app.call('Page.navigate', { url: base })
+      await waitFor('!!document.querySelector("button[aria-label=Settings]")')
+      assert.equal(await evaluate('document.body.textContent.includes("Failed to load plugins")'), false)
+      await evaluate('document.querySelector("button[aria-label=Settings]").click()')
+      await waitFor('[...document.querySelectorAll("button")].some(b => b.textContent.trim() === "Model Picker Augmented")')
+      await evaluate('[...document.querySelectorAll("button")].find(b => b.textContent.trim() === "Model Picker Augmented").click()')
+      await waitFor('document.querySelectorAll(".msp-card").length > 0')
+      ok('Model Picker in real DSH UI', 'GUI loads without plugin errors; model settings catalog renders')
+    } finally {
+      app.close()
+      await fetch(`${cdpBase}/json/close/${appTarget.id}`)
+    }
+  }
 
   const target = await (await fetch(`${cdpBase}/json/new?${encodeURIComponent(`chrome-extension://${extId}/sidepanel.html`)}`, { method: 'PUT' })).json()
   const panel = await connectCdp(target.webSocketDebuggerUrl)

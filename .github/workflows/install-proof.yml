@@ -54,6 +54,7 @@ jobs:
 
       - name: Run the install proof
         env:
+          PROOF_MODEL_PICKER_SPEC: https://github.com/ManoloRemiddi/dsh-model-picker-augmented/releases/download/v1.1.2/dsh-model-picker-augmented-1.1.2.tgz
           PROOF_LLM: '0'
           PROOF_SOURCE: local
           PROOF_REPO: ${{ github.workspace }}
