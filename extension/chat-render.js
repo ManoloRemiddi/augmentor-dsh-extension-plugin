@@ -592,6 +592,13 @@ export function createChatUI(els) {
         break
       }
       case 'turn/end': {
+        const failure = data.reason?.kind === 'error' ? data.reason.error?.message : null
+        if (failure) {
+          flushAssistant()
+          const row = el('div', 'toolresult err')
+          row.appendChild(el('pre', 'out', failure))
+          $log.appendChild(row)
+        }
         break
       }
       default:

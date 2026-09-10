@@ -32,24 +32,28 @@
 //
 // No npm dependencies (node: builtins only). Env:
 //   PROOF_REPO    repo url/path to clone (default: the public GitHub repo)
+//   PROOF_TREE    copy a candidate or extracted release directory instead of cloning
+//   PROOF_MODEL_HOME  model settings to COPY for PROOF_LLM (default ~/.dsh)
 //   PROOF_SOURCE  local (default) | npm
+//   PROOF_MODEL_PICKER_SPEC  optional matching Model Picker GitHub asset or local tarball
 //   CHROME_BIN    chromium binary (default /usr/lib/chromium/chromium)
 //   PROOF_PORT    fixed app port (default: any free port)
 //   PROOF_LLM     1 = run the LLM browser leg (needs LLM credentials in env)
 //   PROOF_KEEP    1 = keep the work dir (and leave logs for inspection)
 //
-// Exit 0 = every leg passed. The user's real ~/.dsh is only ever read
-// (token / LLM config symlinks), never written.
+// Exit 0 = every requested leg passed. User model settings are copied only
+// when PROOF_LLM=1; the proof never writes through to the original home.
 
 import { spawn, execFileSync } from 'node:child_process'
 import { createServer } from 'node:net'
 import { randomBytes } from 'node:crypto'
 import {
-  mkdirSync, rmSync, readFileSync, writeFileSync, symlinkSync,
-  existsSync, readdirSync, openSync,
+  mkdirSync, rmSync, readFileSync, writeFileSync,
+  existsSync, readdirSync, openSync, cpSync,
 } from 'node:fs'
 import { tmpdir, homedir } from 'node:os'
 import path from 'node:path'
+import { browserProof } from './browser-proof.mjs'
 
 // ------------------------------------------------------------ config
 const REPO = process.env.PROOF_REPO ?? 'https://github.com/ManoloRemiddi/augmentor-dsh-extension-plugin'
@@ -111,19 +115,6 @@ const freePort = () => new Promise((res, rej) => {
   s.on('error', rej)
 })
 
-// authCookie (declared in step 4) is read at call time — only the LLM leg
-// (step 12) calls this, always after the first boot has authenticated.
-const rpc = (base, method, payload) => fetch(`${base}/api/${method}`, {
-  method: 'POST',
-  headers: { 'content-type': 'application/json', ...(authCookie ? { cookie: authCookie } : {}) },
-  body: JSON.stringify({ type: 'client-request', rpcId: `proof-${randomBytes(6).toString('hex')}`, method, payload }),
-}).then(async (res) => {
-  const body = await res.json().catch(() => null)
-  if (!res.ok || body?.type !== 'server-response' || !body.result?.ok)
-    throw new Error(`${method}: ${JSON.stringify(body?.result?.error ?? body ?? res.status).slice(0, 300)}`)
-  return body.result.value
-})
-
 // ============================================================ 1. port
 const PORT = Number(process.env.PROOF_PORT) || await freePort()
 const CDP_PORT = await freePort()
@@ -133,35 +124,32 @@ ok('free port', `app :${PORT}, cdp :${CDP_PORT}`)
 rmSync(WORK, { recursive: true, force: true })
 rmSync(ISOLATED_HOME, { recursive: true, force: true })
 mkdirSync(ISOLATED_HOME, { recursive: true })
-execFileSync('git', ['clone', '--quiet', '--depth', '1', REPO, REPO_DIR], { stdio: 'pipe' })
-const HEAD = execFileSync('git', ['-C', REPO_DIR, 'log', '--oneline', '-1'], { encoding: 'utf8' }).trim()
-ok('git clone (fresh user copy)', HEAD.slice(0, 40))
+if (process.env.PROOF_TREE) {
+  cpSync(path.resolve(process.env.PROOF_TREE), REPO_DIR, { recursive: true, filter: src => !['node_modules', '.git', '.env', 'trace', 'bin'].includes(path.basename(src)) })
+  ok('fresh copy of candidate/release tree', process.env.PROOF_TREE)
+} else {
+  execFileSync('git', ['clone', '--quiet', '--depth', '1', REPO, REPO_DIR], { stdio: 'pipe' })
+  const HEAD = execFileSync('git', ['-C', REPO_DIR, 'log', '--oneline', '-1'], { encoding: 'utf8' }).trim()
+  ok('git clone (fresh user copy)', HEAD.slice(0, 40))
+}
 
 // ============================================================ 3. isolated home
-// Token: real install reads $HOME/.dsh/augmentor-ws-token (the pipe uses the
-// real HOME env; the plugin uses $DSH_HOME). Mirror that exactly:
-//   - real token exists -> symlink it into the isolated home (same bytes)
-//   - no real token     -> generate one in the isolated home and export
-//     DSH_AUGMENTOR_WS_TOKEN into the app AND Chrome env (env wins in pipe)
-const realToken = path.join(REAL_HOME, '.dsh', 'augmentor-ws-token')
-const appEnv = { ...process.env, DSH_HOME: ISOLATED_HOME }
-const chromeEnv = { ...process.env, DSH_AUGMENTOR_URL: `http://127.0.0.1:${PORT}` }
-if (existsSync(realToken)) {
-  symlinkSync(realToken, path.join(ISOLATED_HOME, 'augmentor-ws-token'))
-  ok('isolated DSH_HOME + token', 'real token symlinked (read-only)')
-} else {
-  const tok = randomBytes(16).toString('hex')
-  const f = path.join(ISOLATED_HOME, 'augmentor-ws-token')
-  writeFileSync(f, tok, { mode: 0o600 })
-  appEnv.DSH_AUGMENTOR_WS_TOKEN = tok
-  chromeEnv.DSH_AUGMENTOR_WS_TOKEN = tok
-  ok('isolated DSH_HOME + token', 'generated 0600 token (no real home), env-injected')
-}
-// LLM leg needs the model config + persona preset roster (read-only symlinks)
-for (const f of ['settings.yaml', '.anonymous-user-id', '.agent-presets']) {
-  const src = path.join(REAL_HOME, '.dsh', f)
-  const dst = path.join(ISOLATED_HOME, f)
-  if (existsSync(src) && !existsSync(dst)) symlinkSync(src, dst)
+// Use a separate OS home as well: installers and the default chat directory
+// must not modify the user's files. Model configuration is copied only for
+// the explicitly requested live-model leg; no writable user-state symlinks.
+const userHome = path.join(WORK, 'user-home')
+mkdirSync(userHome, { recursive: true })
+const appEnv = { ...process.env, HOME: userHome, DSH_HOME: ISOLATED_HOME }
+const chromeEnv = { ...appEnv, DSH_AUGMENTOR_URL: `http://127.0.0.1:${PORT}` }
+const tok = randomBytes(16).toString('hex')
+writeFileSync(path.join(ISOLATED_HOME, 'augmentor-ws-token'), tok, { mode: 0o600 })
+ok('isolated OS home, DSH_HOME and token', 'fresh 0600 token; no user state shared')
+if (WANT_LLM) {
+  const sourceHome = process.env.PROOF_MODEL_HOME || path.join(REAL_HOME, '.dsh')
+  for (const name of ['settings.yaml', '.credentials.yaml']) {
+    const src = path.join(sourceHome, name)
+    if (existsSync(src)) cpSync(src, path.join(ISOLATED_HOME, name))
+  }
 }
 
 // ============================================================ 4. boot dsh web
@@ -217,6 +205,12 @@ const tAdd = Date.now()
 const npmSpec = process.env.PROOF_NPM_SPEC || 'dsh-augmentor'
 const addArgs = SOURCE === 'npm' ? [npmSpec] : [path.join(REPO_DIR, 'plugin')]
 execFileSync(DSH_BIN, ['plugin', '--profile', 'web', 'add', ...addArgs], { env: appEnv, stdio: 'pipe' })
+if (process.env.PROOF_MODEL_PICKER_SPEC) {
+  execFileSync(DSH_BIN, ['plugin', '--profile', 'web', 'add', process.env.PROOF_MODEL_PICKER_SPEC], { env: appEnv, stdio: 'pipe' })
+  const picker = JSON.parse(readFileSync(path.join(ISOLATED_HOME, 'profiles', 'web', 'node_modules', 'dsh-model-picker-augmented', 'package.json'), 'utf8'))
+  if (picker.version !== '1.1.2') fail('Model Picker package version', `expected 1.1.2, got ${picker.version}`)
+  ok('Model Picker package', '1.1.2 installed in the fresh DSH profile')
+}
 const addedIn = ((Date.now() - tAdd) / 1000).toFixed(1) + 's'
 const pluginPkg = JSON.parse(readFileSync(path.join(REPO_DIR, 'plugin', 'package.json'), 'utf8'))
 ok(`dsh plugin --profile web add ${SOURCE === 'npm' ? `${npmSpec} (registry)` : '<clone>/plugin (local dir)'}`, addedIn)
@@ -293,13 +287,25 @@ ok('chromium + unpacked extension (real id from fresh profile)', extId)
 
 // ============================================================ 8. documented installer
 const manifest = path.join(CHROME_DIR, 'NativeMessagingHosts', 'com.deepseek.dsh.augmentor.json')
-execFileSync('sh', [path.join(REPO_DIR, 'install-native-host.sh'), extId, CHROME_DIR], { stdio: 'pipe', env: { ...process.env } })
+execFileSync('sh', [path.join(REPO_DIR, 'install-native-host.sh'), extId, CHROME_DIR], { stdio: 'pipe', env: appEnv })
 if (!existsSync(manifest) || !existsSync(path.join(REPO_DIR, 'bin', 'pipe-host.sh')))
   fail('install-native-host.sh', 'manifest or launcher missing')
 const m = JSON.parse(readFileSync(manifest, 'utf8'))
 if (!m.allowed_origins?.includes(`chrome-extension://${extId}/`))
   fail('install-native-host.sh', 'manifest allowed_origins does not carry the real extension id')
 ok('install-native-host.sh <id> <chrome-user-data-dir>', 'manifest + launcher + deps')
+// Exercise the existing-user upgrade too, keeping a customized persona.
+const presetFile = path.join(ISOLATED_HOME, '.agent-presets', 'augmentor', 'agent.cordis.yml')
+const legacyPreset = readFileSync(presetFile, 'utf8').replace('    prefix: |', '    text: |') + '\n# retained custom setting\n'
+writeFileSync(presetFile, legacyPreset)
+execFileSync('sh', [path.join(REPO_DIR, 'install-native-host.sh'), extId, CHROME_DIR], { stdio: 'pipe', env: appEnv })
+if (!readFileSync(presetFile, 'utf8').includes('    prefix: |') ||
+    !readFileSync(presetFile, 'utf8').includes('# retained custom setting') ||
+    readFileSync(presetFile + '.pre-0.1.32.bak', 'utf8') !== legacyPreset ||
+    readFileSync(path.join(ISOLATED_HOME, 'augmentor-ws-token'), 'utf8') !== tok)
+  fail('existing-user preset migration', 'migration changed user content or action token')
+ok('existing-user preset migration', 'legacy key updated; custom content, backup and token preserved')
+
 
 // ============================================================ 9. restart app + Chrome
 for (const { proc } of children) { try { process.kill(-proc.pid, 'SIGTERM') } catch {} }
@@ -321,13 +327,16 @@ const app2 = track(spawn(DSH_BIN, ['web', '--no-open', '--port', String(PORT)], 
 }), 'dsh app (restart)')
 chrome = track(spawn(CHROME_BIN, chromeFlags, { env: chromeEnv, detached: true, stdio: ['ignore', chromeLogFd, chromeLogFd] }), 'chromium (restart)')
 authCookie = null // a restarted app re-signs the session cookie — exchange fresh
+let restarted = false
 for (let i = 0; i < 45; i++) {
   const r = await appFetch('/').catch(() => null)
-  if (r?.status === 200) break
+  if (r?.status === 200) { restarted = true; break }
+  if (app2.exitCode !== null) break
   if (r?.status === 401) await exchangeBannerToken()
   await sleep(2000)
 }
-ok('app + chromium restart', 'relaunched on a free port')
+if (!restarted) fail('app + chromium restart', 'DSH exited or never became ready; inspect dsh-app.log')
+ok('app + chromium restart', 'relaunched and authenticated on a free port')
 
 // ============================================================ 10. full chain: pipes: 1
 let hs = null
@@ -339,7 +348,7 @@ for (let i = 0; i < 60; i++) {
   } catch {}
   await sleep(2000)
 }
-const appTail = () => existsSync(appLog) ? '\napp log tail:\n' + readFileSync(appLog, 'utf8').split('\n').slice(-15).join('\n') : ''
+const appTail = () => existsSync(appLog) ? '\napp log tail:\n' + readFileSync(appLog, 'utf8').replace(/token=[A-Za-z0-9_-]+/g, 'token=REDACTED').split('\n').slice(-15).join('\n') : ''
 if (!hs) fail('full chain (Chrome→NMH→pipe→plugin)', 'no handshake after restart' + appTail())
 if (hs.pipes < 1) {
   // A dead transport usually announces itself once, early (native-messaging
@@ -364,51 +373,20 @@ ok('full chain: handshake pipes: 1', `${((Date.now() - tChain) / 1000).toFixed(1
 // ============================================================ 11. handshake asserts
 const problems = []
 if (hs.wsTokenRequired !== true) problems.push(`wsTokenRequired=${hs.wsTokenRequired}`)
-if (SOURCE === 'npm') {
-  const pub = execFileSync('npm', ['view', 'dsh-augmentor', 'version'], { encoding: 'utf8' }).trim()
-  if (hs.version !== pub) problems.push(`handshake v${hs.version} != published v${pub}`)
-} else if (hs.version !== pluginPkg.version) problems.push(`handshake v${hs.version} != repo v${pluginPkg.version}`)
+if (hs.version !== pluginPkg.version) problems.push(`handshake v${hs.version} != extension tree v${pluginPkg.version}`)
 if (hs.agentPreset !== 'augmentor') problems.push(`agentPreset=${hs.agentPreset}`)
 if (!hs.chatCwd) problems.push('chatCwd missing')
 if (hs.wsPath !== '/api/augmentor/ws') problems.push(`wsPath=${hs.wsPath}`)
 if (problems.length) fail('handshake asserts', problems.join('; '))
 ok('handshake asserts', `v${hs.version}, token-gated, preset=${hs.agentPreset}, chatCwd=${hs.chatCwd}`)
 
-// ============================================================ 12. optional LLM leg
-if (!WANT_LLM) {
-  skip('LLM browser leg', 'PROOF_LLM=1 to run it (needs LLM credentials in env)')
-} else {
-  const SID = `proof-${randomBytes(4).toString('hex')}`
-  try {
-    await rpc(`http://127.0.0.1:${PORT}`, 'session.create', { sessionId: SID, cwd: hs.chatCwd, agentPreset: 'augmentor' })
-    const acc = await rpc(`http://127.0.0.1:${PORT}`, 'session.prompt', {
-      sessionId: SID, mode: 'queue',
-      content: [{ type: 'text', text: 'Use the browser_navigate tool to open https://example.com . Then call browser_tabs_list . Reply with one line: the URL of the active tab.' }],
-    })
-    if (acc?.accepted !== true) fail('LLM browser leg', `prompt not accepted: ${JSON.stringify(acc)}`)
-    let assistantText = ''
-    let turnDone = false
-    for (let i = 0; i < 90 && !turnDone; i++) {
-      await sleep(2000)
-      const h = await rpc(`http://127.0.0.1:${PORT}`, 'session.history', { sessionId: SID })
-      for (const e of h.events ?? []) {
-        const ev = e.event
-        if (ev.type === 'assistant/message') {
-          for (const c of ev.data?.message?.content ?? []) if (c.type === 'text') assistantText += c.text
-        }
-        if (ev.type === 'turn/end') turnDone = true
-      }
-    }
-    if (!turnDone) fail('LLM browser leg', 'turn did not complete in 180s')
-    if (!assistantText.includes('example.com')) fail('LLM browser leg', `agent reply lacks example.com: ${assistantText.slice(0, 200)}`)
-    const targets = await (await fetch(`http://127.0.0.1:${CDP_PORT}/json`)).json()
-    if (!targets.some((t) => String(t.url).includes('example.com')))
-      fail('LLM browser leg', `CDP targets never show example.com: ${JSON.stringify(targets.map((t) => t.url))}`)
-    ok('LLM browser leg (real agent drove the real browser)', `reply: ${assistantText.trim().slice(0, 60)}`)
-  } catch (e) {
-    fail('LLM browser leg', e.message)
-  }
-}
+// ============================================================ 12. real UI + public API
+try {
+  await browserProof({ base: `http://127.0.0.1:${PORT}`, cdpPort: CDP_PORT, extId,
+    token: tok, liveModel: WANT_LLM, ok, authCookie, handshake: hs,
+    modelPicker: Boolean(process.env.PROOF_MODEL_PICKER_SPEC) })
+} catch (error) { fail('browser and API compatibility', error.message) }
+if (!WANT_LLM) skip('LLM browser leg', 'PROOF_LLM=1 to run a real model')
 
 cleanup()
 printTable()

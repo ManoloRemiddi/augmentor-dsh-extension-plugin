@@ -11,6 +11,39 @@ All notable changes to Augmentor (the `dsh-augmentor` plugin + the Chromium
 extension). Versions are locked across `plugin/package.json` and
 `extension/manifest.json`.
 
+## 0.1.32 — 2026-09-10
+
+### Fixed
+
+- Support DSH 0.1.5-rc.1: update the tools SDK and migrate calls and live
+  session streams to the public Typert API.
+- Authenticate API calls and WebSockets using DSH's normal token-to-cookie
+  exchange. The bootstrap endpoint requires the existing Augmentor secret,
+  a loopback connection and Host, and no browser Origin. Credentials stay
+  in the native host; failed or uncertain commands are never replayed.
+- Disconnect superseded native ports before reconnecting. Ignore stale port
+  messages, and terminate hosts when extension heartbeats stop. This also
+  prevents browser-tool replies being routed into a different native host.
+- Install the missing browser-agent preset for fresh users and migrate the
+  persona setting from `text` to `prefix`, preserving a backup.
+- Reconcile SDK dependencies on upgrades, support npm when pnpm is absent,
+  and honor `DSH_HOME` consistently in the installer.
+- Render DSH's terminal model errors in the chat.
+
+### Verification
+
+- The installation proof now opens the real Chromium side panel and creates
+  a fresh chat using the shipped preset. It checks authentication refusal
+  paths. The optional live-model leg verifies all five browser tools, page
+  changes, the rendered response, history and Save/Unsave.
+- CI tests both the exact supported DSH version and npm `latest` instead of
+  masking incompatibilities behind the old 0.1.1-rc.2 pin.
+
+- Fresh installation tests also install Model Picker Augmented 1.1.2 from its
+  GitHub release and verify its settings UI alongside the extension.
+- Installation instructions now include the complete GitHub bundle, local
+  authentication, explicit version pins and upgrades from incompatible releases.
+
 ## 0.1.31 — 2026-09-04
 
 ### Added

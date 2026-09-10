@@ -15,8 +15,8 @@ to a DSH workspace.
 ```
 ┌─ Chromium (MV3 extension) ─────────────────┐   ┌─ Your machine ─────────────────────────────────────────────┐
 │ side panel: chat UI (real DSH sessions)    │   │ pipe.mjs — native messaging host (Node, loopback)          │
-│ sw.js: native port + browser executor +    │   │  ├─[POST /api/<method>]──────────────▶ running DSH app      │
-│  work-tab injection (page veil, overlays)  │   │  ├─[WS /api/events.mux|host]◀───────── downlink frames      │
+│ sw.js: native port + browser executor +    │   │  ├─[POST /api/<namespace>/<method>]──────────────▶ running DSH app      │
+│  work-tab injection (page veil, overlays)  │   │  ├─[WS /api/remote.mux]◀───────── downlink frames      │
 └──────────────┬─────────────────────────────┘   │  └─[WS <wsPath, from handshake>]──────▶ dsh-augmentor plugin│
                │ native messaging (token-gated)  │        /api handshake + pipe channel + browser tools +     │
                └────────────────────────────────▶│        chat lifecycle (save-to-workspace)                 │
@@ -40,52 +40,83 @@ fence — by design).
 | `test/` | e2e suites (m3, sw, panel, chrome, m2, tools) + `install-proof.mjs` (deterministic fresh-user install proof) + `plugin/tests/boot/` |
 | `PROPOSAL-plugin-architecture.md` | the architecture record: milestones M1–M4, audit findings S/D/F, decisions |
 
+## DSH compatibility
+
+Augmentor 0.1.32 targets **DSH 0.1.5-rc.1** and its authenticated Typert API.
+Upgrade the plugin, native host and extension together. Augmentor 0.1.31
+and earlier do not work with this DSH release: their SDK dependency,
+HTTP method names, authentication and event streams predate the new API.
+
+To update an existing installation after installing this release:
+
+```sh
+npm install -g @deepseek-ai/dsh@0.1.5-rc.1
+./install-native-host.sh <extension-id>
+dsh plugin --profile web add <absolute-path-to-this-repo>/plugin
+```
+
+Restart DSH and reload Augmentor at `chrome://extensions`. For the npm
+plugin path, use `dsh plugin --profile web add dsh-augmentor@0.1.32` from npm. The installer reconciles dependencies, installs
+the Augmentor preset when missing, and backs up a legacy preset before
+renaming its persona `text` setting to `prefix`. A custom `DSH_HOME` must
+be the same for DSH, the installer and the browser/native host.
+
+The bridge exchanges DSH's launch token through a local endpoint protected
+by Augmentor's existing action-channel secret. Its session cookie remains
+inside the native host. No extension cookie permission or disabled DSH
+authentication is required.
+
 ## Install
 
-Prereqs: Node.js (v22.19+ or v24+), a running `dsh web` instance, a
-Chromium-based browser (Chrome/Chromium/Edge; Firefox & Safari are "coming
-soon" — the native-messaging + content-injection stack is Chromium-specific
-today).
+Tested on **Linux with Chromium**, Node.js 22.19+ or 24+, and DSH 0.1.5-rc.1.
 
-1. **Clone**
+1. Install/update DSH: `npm install -g @deepseek-ai/dsh@0.1.5-rc.1`.
+2. [Download Augmentor 0.1.32 ZIP](https://github.com/ManoloRemiddi/augmentor-dsh-extension-plugin/releases/download/v0.1.32/augmentor-0.1.32-dist.zip) and extract the entire
+   `augmentor-0.1.32` folder to a permanent location. It includes the plugin,
+   extension, native host and preset. Keep all the files together.
+   Source alternative: `git clone --branch v0.1.32 https://github.com/ManoloRemiddi/augmentor-dsh-extension-plugin.git`.
+3. Open `chrome://extensions`, enable **Developer mode**, choose **Load unpacked**,
+   select `extension/` in the extracted folder and copy the extension ID.
+4. From the extracted folder, run `sh install-native-host.sh EXTENSION_ID "$HOME/.config/chromium"`
+   with that ID. The second argument is the browser user-data root, not `Default`.
+   Other Linux defaults: Chrome `~/.config/google-chrome`, Edge `~/.config/microsoft-edge`,
+   Brave `~/.config/BraveSoftware/Brave-Browser`. Other platforms are not verified;
+   these shell commands are not a Windows installer.
+5. In the same folder, run `dsh plugin --profile web add "$PWD/plugin"`.
+   Alternatively install `dsh plugin --profile web add dsh-augmentor@0.1.32`.
+   Choose one method and use your app's actual profile if different from `web`.
+   Pinning the npm version avoids an older release being selected by release-age filtering.
+6. Restart the existing DSH process/service, or start a new instance with `dsh web`.
+   Open the **complete local URL printed by DSH**, including the authentication token.
+   A bare `http://127.0.0.1:3080/` may show “dsh web authentication required”.
+   This authenticates the browser to DSH on your own PC; it does not require a
+   DeepSeek account or approval. Restart Chromium, open the side panel and test
+   a prompt with a configured model. `/api/augmentor` should report `0.1.32` and `pipes: 1`.
 
-   ```sh
-   git clone https://github.com/ManoloRemiddi/augmentor-dsh-extension-plugin.git
-   ```
+For upgrades from 0.1.31 or earlier, use these manual steps if the old panel
+cannot connect. Back up the old folder, update all three components and rerun
+the installer. Update an existing linked plugin directory instead of adding
+a duplicate. Keep any custom `DSH_HOME` consistent between DSH, the installer
+and browser/native host. The installer preserves custom presets and backs up
+legacy settings before migration.
 
-2. **Load the extension** — `chrome://extensions` → *Developer mode* →
-   *Load unpacked* → pick the `extension/` directory. Note the extension ID.
+DSH and a configured local model can work offline once installed. Cloud models
+require their provider's credentials and internet. Accessing online pages also
+requires internet.
 
-3. **Install the native host**
+### Optional: Model Picker Augmented
 
-   ```sh
-   ./install-native-host.sh <extension-id>
-   ```
+[Model Picker Augmented 1.1.2](https://github.com/ManoloRemiddi/dsh-model-picker-augmented/releases/tag/v1.1.2)
+supports DSH 0.1.5-rc.1 and fixes the undefined `settings` loader error. It adds
+search, pinning and visibility controls; Augmentor shares its model curation.
+Install the GitHub package (this companion is not published on npm):
 
-   Writes the NMH manifest (points at `pipe.mjs`), creates the per-machine
-   action-channel token (`~/.dsh/augmentor-ws-token`, 0600) if missing, and
-   installs the repo's Node dependencies (root + `plugin/`) if missing.
+```sh
+dsh plugin --profile web add https://github.com/ManoloRemiddi/dsh-model-picker-augmented/releases/download/v1.1.2/dsh-model-picker-augmented-1.1.2.tgz
+```
 
-4. **Mount the plugin into your DSH profile**
-
-   ```sh
-   dsh plugin --profile web add <repo-path>/plugin
-   ```
-
-   (or from npm: `dsh plugin --profile web add dsh-augmentor`.)
-   Restart the `dsh web` session so the profile composes the plugin layer.
-
-   > **pnpm users — first 24h after a release:** `dsh plugin` forwards to
-   > pnpm, and pnpm ≥ 11 enforces a ~24h *minimum release age* (supply-chain
-   > protection) — silently installing the newest version that passes. Right
-   > after a publish, the bare name can therefore resolve to the **previous**
-   > release. `npm view dsh-augmentor version` shows the newest; to get it
-   > immediately, pin it: `dsh plugin --profile web add dsh-augmentor@<version>`.
-   > The bare name self-heals once the release is a day old.
-
-5. **Reload the extension** (it reconnects the native port; a brief SW
-   reconnect blip is normal). Open a side panel session, type a prompt, and
-   the agent can now see and drive the active work tab.
+Restart DSH and reload its page. For an existing linked Git checkout, update
+that checkout to tag `v1.1.2` instead of adding another plugin entry.
 
 ## Security posture
 

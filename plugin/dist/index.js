@@ -433,6 +433,33 @@ manual: dsh plugin --profile ${found.name} add dsh-augmentor@${version}
     if (routesEffect) routesEffect.dispose();
     currentServer = webServer2;
     routesEffect = ctx.effect(() => {
+      const disposeAuth = webServer2.register({
+        kind: "exact",
+        path: `${config.apiPath}/auth`,
+        handler: (req, res) => {
+          res.setHeader("cache-control", "no-store");
+          const remote = req.socket.remoteAddress;
+          let localHost = false;
+          try {
+            localHost = ["127.0.0.1", "localhost", "[::1]"].includes(new URL(`http://${req.headers.host}`).hostname);
+          } catch {
+          }
+          if (req.method !== "POST" || !localHost || !["127.0.0.1", "::1", "::ffff:127.0.0.1"].includes(remote ?? "") || req.headers.origin !== void 0 || req.headers["sec-fetch-site"] !== void 0 || !resolved.token || !tokenEquals(typeof req.headers["x-augmentor-token"] === "string" ? req.headers["x-augmentor-token"] : null, resolved.token)) {
+            res.writeHead(403);
+            res.end("forbidden");
+            return;
+          }
+          const connection = ctx.get("connection");
+          if (!connection?.authenticatedUrl) {
+            res.writeHead(503);
+            res.end("DSH authentication service unavailable");
+            return;
+          }
+          const token = new URL(connection.authenticatedUrl("http://127.0.0.1")).searchParams.get("token");
+          res.writeHead(200, { "content-type": "application/json" });
+          res.end(JSON.stringify({ token }));
+        }
+      });
       const disposeRoute = webServer2.register({
         kind: "exact",
         path: config.apiPath,
@@ -454,6 +481,7 @@ manual: dsh plugin --profile ${found.name} add dsh-augmentor@${version}
             wsPath: config.wsPath,
             wsTokenRequired: Boolean(resolved.token),
             wsTokenSource: resolved.source,
+            dshHome: dshHome(),
             chatCwd: chatDir,
             agentPreset: config.agentPreset,
             saved,
@@ -487,7 +515,7 @@ manual: dsh plugin --profile ${found.name} add dsh-augmentor@${version}
           });
         }
       });
-      return [disposeRoute, disposeUpgrade];
+      return [disposeAuth, disposeRoute, disposeUpgrade];
     }, "dsh-augmentor: action channel routes");
     console.log("[dsh-augmentor] action channel ready (api=%s, ws token: %s)", config.apiPath, resolved.source);
   };

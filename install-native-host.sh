@@ -49,17 +49,14 @@ chmod +x "$HOST_SH"
 # only needs the root install for the pipe. The installer runs inside the
 # clone, so it makes the first pipe boot deterministic here instead of
 # asking the user for an extra install step.
+# Reconcile on upgrades too: an existing node_modules may still contain the
+# old DSH tools SDK. Node/npm is sufficient when pnpm is not installed.
 if command -v pnpm >/dev/null 2>&1; then
-  if [ ! -e "$AUGMENTOR_DIR/node_modules" ]; then
-    echo "installing pipe dependencies (first run in a fresh clone)..."
-    (cd "$AUGMENTOR_DIR" && pnpm install --ignore-scripts) || \
-      echo "warn: pnpm install in repo root failed; the pipe will not start (Cannot find package 'ws')" >&2
-  fi
-  if [ ! -e "$AUGMENTOR_DIR/plugin/node_modules" ]; then
-    echo "installing plugin dependencies (first run in a fresh clone)..."
-    (cd "$AUGMENTOR_DIR/plugin" && pnpm install --ignore-scripts) || \
-      echo "warn: pnpm install in plugin/ failed; the local-dir plugin mount may not load (the npm path is unaffected)" >&2
-  fi
+  (cd "$AUGMENTOR_DIR" && pnpm install --frozen-lockfile --ignore-scripts)
+  (cd "$AUGMENTOR_DIR/plugin" && pnpm install --frozen-lockfile --ignore-scripts)
+else
+  (cd "$AUGMENTOR_DIR" && npm install --ignore-scripts)
+  (cd "$AUGMENTOR_DIR/plugin" && npm install --ignore-scripts)
 fi
 
 # Per-machine action-channel secret (drives the user's browser). The plugin
@@ -67,8 +64,9 @@ fi
 # first pipe boot deterministic. 0600: same user only.
 # S15 (audit): atomic O_EXCL creation (same trick as the plugin and the
 # pipe) — if a concurrent first boot already won, that is not an error.
-TOKEN_FILE="$HOME/.dsh/augmentor-ws-token"
-mkdir -p "$HOME/.dsh"
+DSH_DATA_DIR="${DSH_HOME:-$HOME/.dsh}"
+TOKEN_FILE="$DSH_DATA_DIR/augmentor-ws-token"
+mkdir -p "$DSH_DATA_DIR"
 "$NODE_BIN" -e '
   const fs = require("node:fs"), c = require("node:crypto")
   try {
@@ -81,6 +79,31 @@ mkdir -p "$HOME/.dsh"
   }
 ' "$TOKEN_FILE"
 
+# Install the shipped persona for fresh users, preserving any customized
+# existing preset. DSH discovers user presets from its own data directory.
+"$NODE_BIN" -e '
+  const fs = require("node:fs"), path = require("node:path")
+  const dest = path.join(process.argv[2], ".agent-presets", "augmentor")
+  if (!fs.existsSync(dest)) {
+    fs.mkdirSync(path.dirname(dest), { recursive: true })
+    fs.cpSync(process.argv[1], dest, { recursive: true, errorOnExist: true, force: false })
+    console.log("installed Augmentor agent preset")
+  } else {
+    const file = path.join(dest, "agent.cordis.yml")
+    if (fs.existsSync(file)) {
+      const original = fs.readFileSync(file, "utf8")
+      // Rename only the legacy persona key, preserving the prompt and all
+      // customized entries. Retain an exclusive backup before migration.
+      const migrated = original.replace(/(name: .?@deepseek-ai\/dsh-persona.?\r?\n[ \t]+config:\r?\n[ \t]+)text:/, "$1prefix:")
+      if (migrated !== original) {
+        fs.writeFileSync(file + ".pre-0.1.32.bak", original, { flag: "wx" })
+        fs.writeFileSync(file, migrated)
+        console.log("migrated persona text to prefix; backup retained")
+      }
+    }
+  }
+' "$AUGMENTOR_DIR/presets/augmentor" "$DSH_DATA_DIR"
+
 # D5 (audit): M1 <-> M4 mount conflict guard.
 #   M1 mounted the plugin entry directly from source in the DSH home patch
 #   file:  - insert: / - id: dsh-augmentor / name: '<abs path>?src=<commit>'
@@ -92,7 +115,7 @@ mkdir -p "$HOME/.dsh"
 # comment header included), keep a .bak, and warn. Only when the file holds
 # exactly one ?src= mount AND at least one bare-name mount — otherwise
 # leave the file untouched (no guessing).
-DSH_PATCH="${DSH_PATCH:-$HOME/.dsh/cordis.patch.yml}"
+DSH_PATCH="${DSH_PATCH:-$DSH_DATA_DIR/cordis.patch.yml}"
 if [ -f "$DSH_PATCH" ]; then
   RANGE="$(awk '
     { L[NR] = $0 }

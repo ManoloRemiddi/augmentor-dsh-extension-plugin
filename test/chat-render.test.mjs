@@ -39,5 +39,8 @@ for (const delivery of ['live','history']) {
     ui.applyLog(events);assert.equal(log.querySelectorAll('.msg.user').length,1)
     ui.applyLog([message(7,undefined,'A legacy human message')])
     assert.equal(log.querySelectorAll('.msg.user').length,2)
+    ui.applyLog([{kind:'event',event:{seq:8,type:'turn/end',data:{reason:{kind:'error',error:{message:'Model unavailable <script>unsafe</script>'}}}}}])
+    assert.match(log.querySelector('.err').textContent,/Model unavailable/)
+    assert.equal(log.querySelector('.err script'),null)
   })
 }

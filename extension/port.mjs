@@ -49,6 +49,7 @@ function summarizeParams(p) {
 // F5: client-request ids from the canonical factory (same `c1, c2, …`
 // sequence the old state.reqSeq counter produced).
 const nextClientId = genId('c')
+let heartbeatTimer = null
 
 // Does the DSH session exist on the server? session.history is the cheapest
 // probe: an unknown session answers `session "<id>" not found`, a network
@@ -76,8 +77,14 @@ export function ensurePort() {
     return
   }
   state.port = port
+  clearInterval(heartbeatTimer)
+  heartbeatTimer = setInterval(() => {
+    if (state.port !== port) return
+    try { port.postMessage({ method: 'augmentor/heartbeat' }) } catch { fail('native host heartbeat failed') }
+  }, 15000)
 
   port.onMessage.addListener((msg) => {
+    if (state.port !== port) return // ignore a superseded connection
     // Request/response for the client requests we sent (initialize, prompt).
     if (msg.id !== undefined && msg.method === undefined) {
       log('wire', { dir: 'ext<-bridge', msg: summarize(msg) })
@@ -96,10 +103,12 @@ export function ensurePort() {
       log('wire', { dir: 'bridge->ext', msg: { id: msg.id, method: msg.method, params: msg.params } })
       handleBrowserAction(msg.id, msg.params).then(
         (result) => {
+          if (state.port !== port) return
           log('wire', { dir: 'ext->bridge', msg: { id: msg.id, result } })
           post({ id: msg.id, result })
         },
         (e) => {
+          if (state.port !== port) return
           log('wire', { dir: 'ext->bridge', msg: { id: msg.id, error: String(e) } })
           post({ id: msg.id, error: { message: String(e?.message ?? e) } })
         },
@@ -123,6 +132,7 @@ export function ensurePort() {
 
   port.onDisconnect.addListener(() => {
     const err = chrome.runtime.lastError?.message
+    if (state.port !== port) return
     log('port', { event: 'disconnect', error: err ?? null })
     fail(err ?? 'native host disconnected')
   })
@@ -187,11 +197,12 @@ export function ensurePort() {
           state.sessionId = remembered
         }
       }
+      if (state.port !== port) return
       state.retryCount = 0
       state.phase = 'ready'
       broadcast(log('handshake', { serverInfo: result.serverInfo, provider: sel.provider, model: sel.model }))
     } catch (e) {
-      fail(`initialize failed: ${e.message}`)
+      if (state.port === port) fail(`initialize failed: ${e.message}`)
     }
   })()
 }
@@ -218,7 +229,11 @@ function scheduleReconnect(message) {
 export function fail(message) {
   state.phase = 'error'
   state.error = message
+  const oldPort = state.port
   state.port = null
+  clearInterval(heartbeatTimer)
+  heartbeatTimer = null
+  try { oldPort?.disconnect() } catch { /* already disconnected */ }
   // F5: one drop for every in-flight request (the old code rejected each
   // waiter with its own Error; same observable effect).
   state.pending.dropAll(new Error(message))

@@ -1,6 +1,6 @@
 {
   "name": "dsh-augmentor",
-  "version": "0.1.31",
+  "version": "0.1.32",
   "description": "Augmentor for DeepSeek Harness: DSH plugin + Chrome extension that drives the user's real browser from any DSH session — live page snapshot, click, type, tabs — with save-to-workspace chat sessions.",
   "type": "module",
   "main": "dist/index.js",
@@ -44,17 +44,23 @@
     "access": "public"
   },
   "dependencies": {
-    "@deepseek-ai/dsh-tools": "0.1.1-rc.2",
-    "@deepseek-ai/schemastery": "3.18.1",
+    "@deepseek-ai/schemastery": "3.18.2",
     "ws": "8.21.0"
   },
   "peerDependencies": {
-    "@deepseek-ai/cordis": "4.0.1"
+    "@deepseek-ai/cordis": "^4.0.2",
+    "@deepseek-ai/dsh-tools": "0.1.5-rc.1"
   },
   "devDependencies": {
-    "@deepseek-ai/cordis": "4.0.1",
+    "@deepseek-ai/cordis": "4.0.2",
     "@types/node": "24.10.1",
     "@types/ws": "8.18.1",
-    "esbuild": "^0.28.2"
+    "esbuild": "^0.28.2",
+    "@deepseek-ai/dsh-tools": "0.1.5-rc.1"
+  },
+  "peerDependenciesMeta": {
+    "@deepseek-ai/dsh-tools": {
+      "optional": true
+    }
   }
 }
