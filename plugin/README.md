@@ -15,6 +15,18 @@ The package is a [cordis](https://www.npmjs.com/package/@deepseek-ai/cordis)
 bundle: `dsh plugin add` installs it into a profile and its `dsh.bundle.patch`
 layer mounts the plugin automatically.
 
+## Compatibility
+
+Version 0.1.32 requires DSH 0.1.5-rc.1 and matching Augmentor native-host
+and extension files. The tools SDK is a host-provided optional peer, not
+an installed runtime dependency: a second copy in the DSH profile can
+shadow the host registry and break tool scheduling. The exact SDK remains
+pinned as a development dependency for builds.
+
+Upgrade DSH, update the extension tree, rerun `install-native-host.sh`,
+update this plugin, then restart DSH and reload the extension. Older
+Augmentor releases do not support DSH's authenticated Typert API.
+
 ## Requirements
 
 - Node.js ≥ 22.18 (the DSH host requirement)

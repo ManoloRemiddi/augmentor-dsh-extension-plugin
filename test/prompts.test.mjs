@@ -26,8 +26,9 @@ test('bridge reads only the DSH catalog and cannot mutate or leak other settings
 test('real native-messaging pipe reads the DSH Prompt library plugin',async t=>{
   const server=createServer(async(req,res)=>{
     let bytes='';for await(const chunk of req)bytes+=chunk
+    if(req.url!=='/api/settings/describe'){res.writeHead(404);res.end('{}');return}
     const msg=JSON.parse(bytes)
-    if(req.url!=='/api/settings.describe'){res.writeHead(404);res.end('{}');return}
+    assert.deepEqual(msg.payload,{args:{}})
     res.setHeader('Content-Type','application/json');res.end(JSON.stringify({type:'server-response',rpcId:msg.rpcId,result:{ok:true,value:{namespaces:[section()]}}}))
   })
   await new Promise(r=>server.listen(0,'127.0.0.1',r));t.after(()=>{server.closeAllConnections();server.close()})

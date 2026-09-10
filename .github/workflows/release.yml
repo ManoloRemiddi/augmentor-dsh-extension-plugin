@@ -79,17 +79,9 @@ jobs:
       - name: Chromium (playwright build + system deps)
         run: npx -y playwright@latest install --with-deps chromium
 
-      - name: "DSH CLI (pinned: newest pipe-compatible release)"
+      - name: DSH CLI
         run: |
-          # Pinned on purpose, not @latest: DSH 0.1.2-rc.1 gates every /api/*
-          # request behind a browser session cookie (dsh-auth-*, authority-bound
-          # and signed). The launch token only works as a GET / query param for
-          # the 303 cookie exchange — there is no header/query credential for
-          # the API itself. The Augmentor pipe is a background process with no
-          # browser cookie, so it cannot authenticate on 0.1.2-rc.1.
-          # 0.1.1-rc.2 is the newest CLI it can talk to. Bump (and re-prove)
-          # when a DSH release adds a local-client auth path the pipe can use.
-          npm install -g @deepseek-ai/dsh@0.1.1-rc.2
+          npm install -g @deepseek-ai/dsh@0.1.5-rc.1
           dsh --version
 
       - name: Verify + pack (lockstep, changelog, asset)
@@ -124,6 +116,7 @@ jobs:
           PROOF_LLM: '0'
           PROOF_SOURCE: npm
           PROOF_NPM_SPEC: "dsh-augmentor@${{ env.VER }}"
+          PROOF_REPO: ${{ github.workspace }}
         run: |
           export CHROME_BIN="$(ls -d "$HOME/.cache/ms-playwright/chromium-"*/chrome-linux*/chrome | head -n1)"
           # A fresh publish is not instantly resolvable: npm itself says it

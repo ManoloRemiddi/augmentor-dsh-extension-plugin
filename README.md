@@ -15,8 +15,8 @@ to a DSH workspace.
 ```
 ┌─ Chromium (MV3 extension) ─────────────────┐   ┌─ Your machine ─────────────────────────────────────────────┐
 │ side panel: chat UI (real DSH sessions)    │   │ pipe.mjs — native messaging host (Node, loopback)          │
-│ sw.js: native port + browser executor +    │   │  ├─[POST /api/<method>]──────────────▶ running DSH app      │
-│  work-tab injection (page veil, overlays)  │   │  ├─[WS /api/events.mux|host]◀───────── downlink frames      │
+│ sw.js: native port + browser executor +    │   │  ├─[POST /api/<namespace>/<method>]──────────────▶ running DSH app      │
+│  work-tab injection (page veil, overlays)  │   │  ├─[WS /api/remote.mux]◀───────── downlink frames      │
 └──────────────┬─────────────────────────────┘   │  └─[WS <wsPath, from handshake>]──────▶ dsh-augmentor plugin│
                │ native messaging (token-gated)  │        /api handshake + pipe channel + browser tools +     │
                └────────────────────────────────▶│        chat lifecycle (save-to-workspace)                 │
@@ -40,9 +40,36 @@ fence — by design).
 | `test/` | e2e suites (m3, sw, panel, chrome, m2, tools) + `install-proof.mjs` (deterministic fresh-user install proof) + `plugin/tests/boot/` |
 | `PROPOSAL-plugin-architecture.md` | the architecture record: milestones M1–M4, audit findings S/D/F, decisions |
 
+## DSH compatibility
+
+Augmentor 0.1.32 targets **DSH 0.1.5-rc.1** and its authenticated Typert API.
+Upgrade the plugin, native host and extension together. Augmentor 0.1.31
+and earlier do not work with this DSH release: their SDK dependency,
+HTTP method names, authentication and event streams predate the new API.
+
+To update an existing installation after installing this release:
+
+```sh
+npm install -g @deepseek-ai/dsh@0.1.5-rc.1
+./install-native-host.sh <extension-id>
+dsh plugin --profile web add <absolute-path-to-this-repo>/plugin
+```
+
+Restart DSH and reload Augmentor at `chrome://extensions`. For the npm
+plugin path, use `dsh plugin --profile web add dsh-augmentor@0.1.32` once
+that version is published. The installer reconciles dependencies, installs
+the Augmentor preset when missing, and backs up a legacy preset before
+renaming its persona `text` setting to `prefix`. A custom `DSH_HOME` must
+be the same for DSH, the installer and the browser/native host.
+
+The bridge exchanges DSH's launch token through a local endpoint protected
+by Augmentor's existing action-channel secret. Its session cookie remains
+inside the native host. No extension cookie permission or disabled DSH
+authentication is required.
+
 ## Install
 
-Prereqs: Node.js (v22.19+ or v24+), a running `dsh web` instance, a
+Prereqs: Node.js (v22.19+ or v24+), a running DSH 0.1.5-rc.1 `dsh web` instance, a
 Chromium-based browser (Chrome/Chromium/Edge; Firefox & Safari are "coming
 soon" — the native-messaging + content-injection stack is Chromium-specific
 today).

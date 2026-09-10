@@ -16,8 +16,7 @@
  * loopback client passes the reachability policy:
  *
  *   Chrome SW ──[native frames]──▶ pipe.mjs ──[POST /api/<method>]──▶ DSH app
- *                                    │  └─[WS /api/events.mux]──▶ downlink frames
- *                                    │  └─[WS /api/events.host]─▶ downlink frames
+ *                                    │  └─[WS /api/remote.mux]──▶ session streams
  *                                    └─[WS <wsPath from the plugin's GET
  *                                       /api/augmentor handshake>]─▶ plugin
  *
@@ -28,11 +27,9 @@
  *                {id, method: 'browser/execute', params}   (server→client request)
  *                {method: 'session.event' | 'session.status' | …, params} (notification)
  *
- * Downlink ServerRequest frames ({type:'server-request', rpcId, method:<frame
- * type>, payload}) map as frame type 'a/b' → ext method 'a.b'. Answerable
- * frames (approval/requested, question/requested) forward with id = rpcId, so
- * the extension's {id, result|error} reply is echoed to POST /api/respond as
- * a client-response.
+ * shared/dsh-remote.mjs maps the extension's legacy method names onto DSH's
+ * public Typert endpoints and authenticated session follow/event streams.
+ * shared/dsh-auth.mjs holds the browser-session cookie in this process only.
  *
  * Local methods answered without a DSH round trip:
  *   augmentor/models      llm.models + host.describe + settings.describe,
@@ -72,6 +69,8 @@ import { decode as wireDecode, encode as wireEncode, Pending } from './wire.mjs'
 // unzip/python3 is too fragile for a release artifact path).
 import { unzipSync } from 'fflate'
 import { promptLibrary } from './shared/prompts.mjs'
+import { createDshClient } from './shared/dsh-auth.mjs'
+import { createRemoteAdapter } from './shared/dsh-remote.mjs'
 
 const AUGMENTOR_DIR = path.dirname(fileURLToPath(import.meta.url))
 
@@ -221,46 +220,9 @@ const log = (...parts) => {
 }
 
 // ------------------------------------------------------- DSH /api client
-let rpcSeq = 0
-/** One client request: POST /api/<method> with the client-request envelope. */
+/** Public DSH 0.1.5 API adapter; the extension wire remains stable. */
 async function dsh(method, payload = {}) {
-  // S12 (audit): the method is interpolated into the URL path — constrain it
-  // to the stock method shape (session.prompt, host.describe,
-  // trace/fence-probe, …). Dotted/slash-separated alphanumeric segments only;
-  // `..`, leading dots and stray path characters are rejected.
-  if (typeof method !== 'string' || !/^[a-z][a-z0-9_-]*(?:[./][a-z0-9_-]+)*$/i.test(method)) {
-    throw new Error(`dsh: refusing invalid method name ${JSON.stringify(method)}`)
-  }
-  const rpcId = `pipe-${++rpcSeq}`
-  const res = await fetch(`${DSH_BASE}/api/${method}`, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ type: 'client-request', rpcId, method, payload }),
-  })
-  const body = await res.json().catch(() => null)
-  if (!res.ok || !body || body.type !== 'server-response' || body.rpcId !== rpcId) {
-    throw new Error(`${method}: unexpected envelope (http ${res.ok ? 'ok' : res.status})`)
-  }
-  if (!body.result.ok) {
-    const e = body.result.error ?? {}
-    throw new Error(e.message ?? JSON.stringify(e))
-  }
-  return body.result.value
-}
-
-/** Answer a host-initiated server-request: POST /api/respond, client-response. */
-async function dshRespond(rpcId, extMsg) {
-  const result = extMsg.error
-    ? { ok: false, error: { code: 'bad-request', message: extMsg.error.message ?? 'client refused', details: { issues: [] } } }
-    : { ok: true, value: extMsg.result }
-  const res = await fetch(`${DSH_BASE}/api/respond`, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ type: 'client-response', rpcId, result }),
-  })
-  const receipt = await res.json().catch(() => null)
-  trace({ kind: 'respond', rpcId, receipt })
-  if (!receipt?.accepted) log('respond rejected', rpcId, receipt)
+  return remote.call(method, payload)
 }
 
 // ------------------------------------------------- extension frame I/O
@@ -317,7 +279,6 @@ function pumpOut() {
 // Ext reply id → origin: host server-requests we forwarded (rpcId) vs plugin
 // browser round trips (plugin UUID). First match wins; ids never collide in
 // practice (different minters).
-const forwardedRpc = new Map() // rpcId → 'mux' | 'host'
 const pluginPending = new Map() // plugin id → true
 // Extension-originated lifecycle requests (augmentor/save|unsave|state)
 // forwarded to the plugin, waiting for its reply frame.
@@ -325,11 +286,6 @@ const pluginReplyWaiters = new Pending() // F5: id → {resolve, reject, timer, 
 const PLUGIN_TIMEOUT_MS = 30000
 
 async function routeExtReply(msg) {
-  if (forwardedRpc.has(msg.id)) {
-    forwardedRpc.delete(msg.id)
-    await dshRespond(msg.id, msg)
-    return
-  }
   if (pluginPending.has(msg.id)) {
     pluginPending.delete(msg.id)
     pluginSend({ type: 'reply', id: msg.id, ...(msg.error ? { error: msg.error } : { result: msg.result }) })
@@ -346,6 +302,8 @@ function pluginSend(obj) {
   if (pluginWs && pluginWs.readyState === WebSocket.OPEN) pluginWs.send(wireEncode(obj))
 }
 const WS_TOKEN = resolveToken()
+const dshClient = createDshClient(DSH_BASE, WS_TOKEN.token)
+const remote = createRemoteAdapter(DSH_BASE, dshClient, sendToExt, log)
 
 // D5 (audit): the pipe's copy of the wire protocol the plugin must speak.
 // Each endpoint declares what it expects; a mismatch is logged loudly at the
@@ -359,7 +317,7 @@ const PROTOCOL_EXPECTED = 'augmentor-pipe/v1'
 let pluginInfo = null
 async function fetchPluginHandshake() {
   try {
-    const res = await fetch(`${DSH_BASE}/api/augmentor`, { signal: AbortSignal.timeout(3000) })
+    const res = await dshClient.fetch('/api/augmentor', { signal: AbortSignal.timeout(3000) })
     if (!res.ok) {
       log('plugin handshake failed:', res.status)
       pluginInfo = null
@@ -390,7 +348,7 @@ async function openPluginWs() {
   // live app runs the plugin that prefers the header, so a header-only
   // handshake is the full contract.
   const url = `${DSH_BASE.replace(/^http/, 'ws')}${wsPath}`
-  const ws = new WebSocket(url, { headers: WS_TOKEN.token ? { 'x-augmentor-token': WS_TOKEN.token } : {} })
+  const ws = new WebSocket(url, { headers: { ...await dshClient.websocketHeaders(), 'x-augmentor-token': WS_TOKEN.token } })
   pluginWs = ws
   wsAlive = true
   ws.on('open', () => log('plugin ws connected', wsPath))
@@ -470,51 +428,6 @@ const pluginHb = setInterval(() => {
 }, PLUGIN_HEARTBEAT_MS)
 pluginHb.unref()
 
-// ------------------------------------------------------------ downlinks
-const downlinks = new Map() // 'mux' | 'host' → {ws, open}
-const DOWNLINK_PATHS = { mux: '/api/events.mux', host: '/api/events.host' }
-const ANSWERABLE = new Set(['approval/requested', 'question/requested'])
-
-function onDownlinkFrame(stream, frame) {
-  trace({ kind: 'downlink', stream, msg: frame })
-  if (frame.type !== 'server-request') return
-  const t = frame.method // the frame type discriminator
-  const payload = frame.payload
-  if (t === 'stream/error') {
-    log('stream error on', stream, payload?.error)
-    return
-  }
-  if (t === 'host/session-status') {
-    // The old bridge's status vocabulary: the SW compares params.status.
-    sendToExt({ method: 'session.status', params: { sessionId: payload.sessionId, status: payload.running ? 'running' : 'idle' } })
-    return
-  }
-  if (ANSWERABLE.has(t)) {
-    forwardedRpc.set(frame.rpcId, stream)
-    sendToExt({ id: frame.rpcId, method: t.replace('/', '.'), params: payload })
-    return
-  }
-  sendToExt({ method: t.replace('/', '.'), params: payload })
-}
-
-function openDownlink(stream) {
-  if (downlinks.get(stream)?.open) return
-  const ws = new WebSocket(`${DSH_BASE.replace(/^http/, 'ws')}${DOWNLINK_PATHS[stream]}`)
-  downlinks.set(stream, { ws, open: true })
-  ws.on('open', () => log('downlink open', stream))
-  ws.on('message', (data) => {
-    const frame = wireDecode(String(data))
-    if (!frame) return
-    onDownlinkFrame(stream, frame)
-  })
-  ws.on('close', () => {
-    downlinks.set(stream, { ws, open: false })
-    log('downlink closed', stream, '— reopening (v1: reopen + refetch, no since)')
-    scheduleReconnect(() => openDownlink(stream), stream)
-  })
-  ws.on('error', (e) => log('downlink error', stream, e.message))
-}
-
 // ------------------------------------------------------------- reconnect
 const retryTimers = new Map()
 function scheduleReconnect(open, key) {
@@ -573,7 +486,7 @@ const localMethods = {
       fetchJson(`https://api.github.com/repos/${RELEASE_REPO}/releases/latest`, 8000).catch((e) => ({ error: e.message })),
       // The plugin's handshake carries its installed version (it reads its
       // own package.json at boot). Tolerate the app/plugin being down.
-      fetch(`${DSH_BASE}/api/augmentor`, { signal: AbortSignal.timeout(3000) })
+      dshClient.fetch('/api/augmentor', { signal: AbortSignal.timeout(3000) })
         .then((r) => (r.ok ? r.json() : null))
         .catch(() => null),
     ])
@@ -718,7 +631,7 @@ const localMethods = {
     // being down — the SW then falls back to the old cwd and shows no badge.
     let augmentor = null
     try {
-      const res = await fetch(`${DSH_BASE}/api/augmentor`, { signal: AbortSignal.timeout(3000) })
+      const res = await dshClient.fetch('/api/augmentor', { signal: AbortSignal.timeout(3000) })
       if (res.ok) augmentor = await res.json()
     } catch {
       /* plugin not up yet: live Save will fail with a readable error */
@@ -842,6 +755,7 @@ function shapeSessionList(value) {
 
 let stdinBuf = Buffer.alloc(0)
 async function handleExtMessage(msg) {
+  if (msg.method === 'augmentor/heartbeat') return
   trace({ kind: 'ext->pipe', msg })
   // Response form: id present, no method.
   if (msg.id !== undefined && msg.method === undefined) {
@@ -897,20 +811,29 @@ async function handleExtMessage(msg) {
 async function boot() {
   try {
     const describe = await dsh('host.describe', {})
-    log(`DSH app ready: dsh ${describe.version}, home ${describe.home}, ${describe.attachedSessions} attached session(s)`)
+    log(`DSH app ready: ${describe.version}, home ${describe.home}`)
   } catch (e) {
     log('DSH app not reachable yet:', e.message)
     scheduleReconnect(boot, 'boot')
     return
   }
-  openDownlink('mux')
-  openDownlink('host')
+  remote.start()
   log('action-channel token source:', WS_TOKEN.source)
-  void openPluginWs()
+  void openPluginWs().catch(e => { log('plugin authentication failed', e.message); scheduleReconnect(openPluginWs, 'plugin') })
 }
 
 // --------------------------------------------------------------- lifecycle
+const idleLimit = Number(process.env.AUGMENTOR_PIPE_IDLE_MS ?? 60000)
+let lastExtensionTraffic = Date.now()
+const idleWatchdog = setInterval(() => {
+  if (Date.now() - lastExtensionTraffic > (Number.isFinite(idleLimit) && idleLimit > 0 ? idleLimit : 60000)) {
+    log('extension heartbeat expired; closing native host')
+    cleanup(0)
+  }
+}, Math.min(Number.isFinite(idleLimit) && idleLimit > 0 ? idleLimit : 5000, 5000))
+idleWatchdog.unref()
 process.stdin.on('data', (chunk) => {
+  lastExtensionTraffic = Date.now()
   stdinBuf = Buffer.concat([stdinBuf, chunk])
   while (stdinBuf.length >= 4) {
     const len = stdinBuf.readUInt32LE(0)
@@ -929,9 +852,9 @@ process.stdin.on('data', (chunk) => {
 function cleanup(code) {
   if (shuttingDown) return
   shuttingDown = true
-  for (const d of downlinks.values()) {
-    try { d.ws.terminate() } catch { /* already dead */ }
-  }
+  clearInterval(idleWatchdog)
+  for (const timer of retryTimers.values()) clearTimeout(timer)
+  remote.close()
   try { pluginWs?.terminate() } catch { /* already dead */ }
   process.exit(code)
 }
@@ -940,6 +863,9 @@ process.stdin.on('end', () => {
   log('extension port closed (stdin end)')
   cleanup(0)
 })
+process.stdin.on('close', () => cleanup(0))
+process.stdin.on('error', () => cleanup(1))
+process.stdout.on('error', () => cleanup(1))
 process.stdin.resume()
 process.on('SIGTERM', () => cleanup(0))
 process.on('SIGINT', () => cleanup(130))

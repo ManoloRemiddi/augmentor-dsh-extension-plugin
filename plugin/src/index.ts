@@ -708,6 +708,39 @@ export function apply(ctx: Context, config: Config) {
     // profile teardown), so a re-apply can register again without a
     // duplicate-route collision.
     routesEffect = ctx.effect(() => {
+      // DSH 0.1.2+ authenticates its API and downlinks with a browser-session
+      // cookie. Only the local native host holding our existing secret may
+      // request the standard launch-token exchange. Never expose it in the
+      // public handshake, to a browser Origin, or over a remote connection.
+      const disposeAuth = webServer.register({
+        kind: 'exact',
+        path: `${config.apiPath}/auth`,
+        handler: (req, res) => {
+          res.setHeader('cache-control', 'no-store')
+          const remote = req.socket.remoteAddress
+          let localHost = false
+          try {
+            localHost = ['127.0.0.1', 'localhost', '[::1]'].includes(new URL(`http://${req.headers.host}`).hostname)
+          } catch { /* invalid Host */ }
+          if (req.method !== 'POST' || !localHost ||
+              !['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(remote ?? '') ||
+              req.headers.origin !== undefined || req.headers['sec-fetch-site'] !== undefined ||
+              !resolved.token || !tokenEquals(typeof req.headers['x-augmentor-token'] === 'string' ? req.headers['x-augmentor-token'] : null, resolved.token)) {
+            res.writeHead(403)
+            res.end('forbidden')
+            return
+          }
+          const connection = ctx.get('connection') as { authenticatedUrl?: (base: string) => string } | undefined
+          if (!connection?.authenticatedUrl) {
+            res.writeHead(503)
+            res.end('DSH authentication service unavailable')
+            return
+          }
+          const token = new URL(connection.authenticatedUrl('http://127.0.0.1')).searchParams.get('token')
+          res.writeHead(200, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ token }))
+        },
+      })
       const disposeRoute = webServer.register({
         kind: 'exact',
         path: config.apiPath,
@@ -735,6 +768,7 @@ export function apply(ctx: Context, config: Config) {
             wsPath: config.wsPath,
             wsTokenRequired: Boolean(resolved.token),
             wsTokenSource: resolved.source,
+            dshHome: dshHome(),
             chatCwd: chatDir,
             agentPreset: config.agentPreset,
             saved,
@@ -773,7 +807,7 @@ export function apply(ctx: Context, config: Config) {
           })
         },
       })
-      return [disposeRoute, disposeUpgrade]
+      return [disposeAuth, disposeRoute, disposeUpgrade]
     }, 'dsh-augmentor: action channel routes')
     console.log('[dsh-augmentor] action channel ready (api=%s, ws token: %s)', config.apiPath, resolved.source)
   }
