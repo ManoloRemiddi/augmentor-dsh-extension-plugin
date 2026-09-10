@@ -59,3 +59,26 @@ test('rejects non-loopback origins and credentials embedded in URLs', () => {
     assert.throws(() => createDshClient(base, 'secret'), /loopback/)
   }
 })
+
+test('accepts auto-minted session cookie from 303 probe redirect without token bootstrap', async t => {
+  let probeHit = 0, executed = 0
+  const base = await fixture(t, (req, res) => {
+    if (req.url === '/') {
+      probeHit++
+      res.writeHead(303, { 'set-cookie': 'dsh-auth-auto=cookie123; HttpOnly; Path=/', location: '/' })
+      res.end()
+      return
+    }
+    if (req.headers.cookie === 'dsh-auth-auto=cookie123' && req.url.startsWith('/api/')) {
+      executed++
+      res.end('{"ok":true}')
+      return
+    }
+    res.writeHead(401); res.end()
+  })
+  const client = createDshClient(base, 'secret')
+  const res = await client.fetch('/api/test')
+  assert.equal(res.status, 200)
+  assert.equal(probeHit, 1)
+  assert.equal(executed, 1)
+})
