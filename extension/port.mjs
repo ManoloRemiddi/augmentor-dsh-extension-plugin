@@ -217,7 +217,7 @@ function scheduleReconnect(message) {
   state.retryCount += 1
   // 1s, 2s, 4s, 8s, 16s, then 30s steady — a dead DSH must not spin the
   // native host, but a recovered one must be picked up without user action.
-  const delay = Math.min(30000, 1000 * 2 ** Math.min(state.retryCount - 1, 4))
+  const delay = Math.min(30000, 1000 * 2 ** (state.retryCount - 1))
   state.error = `${message} — retrying in ${delay / 1000}s`
   broadcast()
   reconnectTimer = setTimeout(() => {

@@ -808,12 +808,25 @@ async function handleExtMessage(msg) {
 }
 
 // ------------------------------------------------------------------ boot
+// A host whose DSH app never comes up would otherwise retry forever, holding
+// ~50 MB of RSS for the life of the browser. Give up after a bounded number
+// of attempts and exit: the extension re-spawns us when the app is back.
+const BOOT_MAX_ATTEMPTS = Number(process.env.DSH_AUGMENTOR_BOOT_ATTEMPTS ?? 10)
+let bootAttempts = 0
+
 async function boot() {
   try {
     const describe = await dsh('host.describe', {})
     log(`DSH app ready: ${describe.version}, home ${describe.home}`)
+    bootAttempts = 0
   } catch (e) {
-    log('DSH app not reachable yet:', e.message)
+    bootAttempts += 1
+    if (bootAttempts >= BOOT_MAX_ATTEMPTS) {
+      log(`DSH app not reachable after ${bootAttempts} attempts (${e.message}); exiting so this host is not orphaned`)
+      cleanup(0)
+      return
+    }
+    log(`DSH app not reachable yet (attempt ${bootAttempts}/${BOOT_MAX_ATTEMPTS}):`, e.message)
     scheduleReconnect(boot, 'boot')
     return
   }
